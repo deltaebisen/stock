@@ -1,0 +1,203 @@
+# 株式検証基盤 - データ取得パイプライン (J-Quants API V2 対応)
+
+J-Quants API V2から日足データを取得してMariaDBに格納する。
+
+## 構成
+
+```
+stock/
+├── run.sh                  # docker runラッパースクリプト (推奨)
+├── docker-compose.yml      # Compose使う場合の定義 (環境による)
+├── Dockerfile              # Pythonイメージ
+├── requirements.txt        # 依存パッケージ
+├── .env.example            # 環境変数テンプレート
+├── .env                    # 実際の認証情報 (gitignore)
+├── sql/
+│   └── init.sql            # DB・ユーザー・テーブル作成SQL
+└── src/
+    ├── jquants_client.py   # J-Quants V2 APIクライアント
+    ├── db.py               # DB接続ヘルパー
+    ├── fetch_listed.py     # 銘柄マスタ取得
+    └── fetch_prices.py     # 日足取得
+```
+
+## セットアップ手順
+
+### 1. APIキー発行
+
+https://jpx-jquants.com/ja/dashboard でAPIキーを発行。
+
+### 2. 初期化SQL実行
+
+`sql/init.sql` 内のパスワードを実際の値に書き換えてから:
+
+```bash
+mysql -u root -p < sql/init.sql
+```
+
+### 3. .env作成
+
+```bash
+cp .env.example .env
+vi .env
+```
+
+埋める項目:
+- `JQUANTS_API_KEY`: ダッシュボードで発行したAPIキー
+- `DB_PASSWORD`: init.sqlで設定したstockuserのパスワード
+
+## 実行 (docker run版 - 推奨)
+
+`run.sh` で全部できる:
+
+```bash
+# 1. イメージビルド
+./run.sh build
+
+# 2. 銘柄マスタ取得 (まず疎通確認)
+./run.sh listed
+
+# 3. 日足フル取得 (時間かかる)
+./run.sh prices
+
+# 日次差分更新
+./run.sh prices-diff
+
+# コンテナ内に入って調査
+./run.sh shell
+```
+
+## 実行 (docker compose版 - 環境が揃ってる場合)
+
+```bash
+docker compose build
+docker compose run --rm worker python -m src.fetch_listed
+docker compose run --rm worker python -m src.fetch_prices
+docker compose run --rm -e FETCH_MODE=diff worker python -m src.fetch_prices
+```
+
+## 長時間処理のバックグラウンド実行
+
+日足フル取得は1時間以上かかる。SSH切断で止まらないように `screen` か `nohup` で:
+
+```bash
+# screen
+screen -S fetch
+./run.sh prices
+# Ctrl+A → D でデタッチ、 screen -r fetch で復帰
+
+# nohup
+nohup ./run.sh prices > fetch.log 2>&1 &
+tail -f fetch.log
+```
+
+## CI/CD (GitHub Actions self-hosted runner)
+
+push 検知で NAS が自分で `git fetch` 相当のことをして `/mnt/public/develop/stock/` を更新する。
+runner は NAS の Docker 内で動く (NAS 本体には何もインストール不要)。
+
+### 初回セットアップ
+
+**1. GitHub に private repo を作って push**
+
+Windows 側 (このリポジトリのトップで):
+```bash
+git init
+git add .
+git commit -m "initial"
+git branch -M main
+git remote add origin git@github.com:<owner>/<repo>.git
+git push -u origin main
+```
+
+**2. runner image を NAS に持ち込み**
+
+Windows 側で:
+```powershell
+docker pull --platform linux/arm64 myoung34/github-runner:latest
+docker save myoung34/github-runner:latest | gzip > github-runner.tar.gz
+scp -P 9222 github-runner.tar.gz shoootake@192.168.10.2:/mnt/public/develop/stock/
+```
+
+NAS 側で:
+```bash
+cd /mnt/public/develop/stock
+gunzip -c github-runner.tar.gz | docker load
+rm github-runner.tar.gz
+```
+
+**3. runner 登録 token を取得**
+
+GitHub repo > Settings > Actions > Runners > "New self-hosted runner" を開くと、
+ARM64 Linux 用のセットアップ画面が出る。そこに `./config.sh --url ... --token XXXX` のような
+コマンドが表示されるので **token (`XXXX` の部分) をコピー** する (1 時間で失効)。
+
+**4. runner 起動**
+
+```bash
+./setup-runner.sh <owner>/<repo> <token>
+docker logs -f stock-runner   # "Listening for Jobs" が出れば成功
+```
+
+GitHub repo > Settings > Actions > Runners の画面で `nas-runner` が **Idle** に
+なっていれば登録完了。
+
+### 動作確認
+
+Windows 側で何か変更してコミット → push:
+```bash
+git commit -am "test deploy"
+git push
+```
+
+GitHub repo > Actions タブで Deploy ワークフローが走るのが見える。完了後、NAS の
+`/mnt/public/develop/stock/` に変更が反映されてる。
+
+### 既知の運用ノート
+
+- `.env` と `data/` は workflow の rsync 対象外。NAS 側の値が保持される
+- 長時間ジョブ (例: `./run.sh prices-bg`) は deploy では自動再起動されない。コード変更を
+  反映させたい時は手動で `docker restart stock-prices` する
+- Next.js dev (`./run.sh web`) は fast-refresh が効くので、deploy 後は何もせずブラウザ
+  リロードでよい
+- `Dockerfile` や `requirements.txt` を変えた時だけ手動で `./run.sh build` し直す
+
+## 設計メモ
+
+### 日付ループ vs 銘柄ループ
+
+`/v2/equities/bars/daily` は `date` パラメータでその日の全銘柄を1リクエストで取れる。
+日付ループ採用 (約2500リクエスト / 10年)。
+
+### レートリミット対応
+
+Lightプランは60 req/min。`time.sleep(1.2)` で抑制。429はクライアント側で15秒待ってリトライ。
+
+### 重複排除
+
+`daily_quotes` は主キー `(code, trade_date)` で INSERT IGNORE。途中で止まっても再実行で続行可能。
+
+### 株価調整
+
+`adjustment_*` カラムに分割・併合調整済みの値が入る。バックテスト時はこちらを使う。
+
+## トラブルシューティング
+
+### docker compose が動かない
+
+`docker-compose` の python interpreter が壊れてる場合あり (TerraMasterの一部環境)。
+→ `run.sh` を使う (docker runベース)。
+
+### DB接続エラー
+
+- network_mode: host で動かしてるので `DB_HOST=127.0.0.1` 推奨
+- ユーザーのhost制限確認: `SELECT user, host FROM mysql.user WHERE user='stockuser';`
+
+### J-Quants認証エラー (401)
+
+- APIキーが正しいか確認
+- ヘッダー名は `x-api-key` (小文字)
+
+### レートリミット (429)
+
+- `time.sleep` を増やす or プランをアップグレード

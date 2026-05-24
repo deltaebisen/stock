@@ -1,0 +1,31 @@
+name: Deploy to NAS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync files to /mnt/public/develop/stock
+        run: |
+          rsync -av --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.env' \
+            --exclude='data/' \
+            --exclude='web/node_modules/' \
+            --exclude='web/.next/' \
+            --exclude='web/out/' \
+            --exclude='*.log' \
+            "${{ github.workspace }}/" /workspace/
+
+      - name: Show deployed commit
+        run: |
+          cd /workspace
+          echo "Deployed: ${{ github.sha }} (${{ github.event.head_commit.message }})"

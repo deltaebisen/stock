@@ -1,0 +1,17 @@
+.env
+data/
+*.pyc
+__pycache__/
+.venv/
+.DS_Store
+*.log
+
+# Next.js (./web)
+web/node_modules/
+web/.next/
+web/out/
+web/.env*.local
+
+# Docker image transport (一時ファイル)
+*.tar
+*.tar.gz

@@ -1,0 +1,11 @@
+services:
+  worker:
+    build: .
+    container_name: stock-worker
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    # NAS標準パッケージのMariaDB(コンテナ外)に接続するためhostネットワーク使用
+    network_mode: host
+    restart: "no"
