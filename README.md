@@ -142,7 +142,13 @@ GitHub > 右上アバター > Settings > Developer settings > Personal access to
 - Repository permissions: **Administration: Read and write**
 - Expiration: 任意 (無期限 or 1 年)
 
-発行された `github_pat_...` を控える。
+発行された `github_pat_...` を NAS の `.env` に追記:
+```
+RUNNER_PAT=github_pat_xxxxxxxxxxxxxxxxxxxx
+```
+
+`.env` は gitignore 済 & CI rsync 除外で NAS local。CLI 引数で渡すと bash history や
+`docker inspect` に漏れるので、`.env` 経由で読ませる流儀にしている (DB_PASSWORD と同じ)。
 
 短期失効する registration token (1h) ではなく PAT を使うことで、コンテナ再起動・NAS 再起動・
 GitHub 側で deregister されたケースも、起動時に自動で再登録される (毎回 token 取り直し不要)。
@@ -150,8 +156,8 @@ GitHub 側で deregister されたケースも、起動時に自動で再登録�
 **4. runner 起動**
 
 ```bash
-./setup-runner.sh <owner>/<repo> <PAT>
-docker logs -f stock-runner   # "Listening for Jobs" が出れば成功
+./setup-runner.sh <owner>/<repo>     # PAT は .env から読まれる
+docker logs -f stock-runner          # "Listening for Jobs" が出れば成功
 ```
 
 GitHub repo > Settings > Actions > Runners の画面で `nas-runner` が **Idle** に
