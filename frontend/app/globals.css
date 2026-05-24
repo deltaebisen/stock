@@ -1,0 +1,339 @@
+:root {
+  color-scheme: dark;
+
+  --bg: #0d1117;
+  --bg-elevated: #161b22;
+  --bg-hover: #1f242c;
+  --border: #30363d;
+  --border-muted: #21262d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --text-dim: #6e7681;
+  --accent: #58a6ff;
+  --positive: #3fb950;
+  --negative: #f85149;
+  --neutral: #c9d1d9;
+
+  --radius: 6px;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+    "Noto Sans JP", "Yu Gothic UI", Meiryo, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  min-height: 100vh;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+button, input, select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+input, select {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  outline: none;
+}
+input:focus, select:focus {
+  border-color: var(--accent);
+}
+
+code, .mono {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.pos { color: var(--positive); }
+.neg { color: var(--negative); }
+.muted { color: var(--text-muted); }
+.dim { color: var(--text-dim); }
+
+/* ===== layout chrome ===== */
+.appshell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  backdrop-filter: blur(8px);
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.brand a { color: inherit; }
+.brand a:hover { text-decoration: none; opacity: 0.8; }
+
+.topbar .spacer { flex: 1; }
+
+.crumb {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.crumb a { color: var(--text-muted); }
+.crumb a:hover { color: var(--accent); }
+
+.content {
+  flex: 1;
+  padding: 20px;
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ===== forms ===== */
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.toolbar .grow { flex: 1; min-width: 200px; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  text-decoration: none;
+}
+.btn:hover {
+  background: var(--bg-hover);
+  text-decoration: none;
+}
+.btn.primary {
+  background: #1f6feb;
+  border-color: #1f6feb;
+  color: white;
+}
+.btn.primary:hover { background: #2c7bf6; }
+.btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ===== table ===== */
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+table.data th, table.data td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-muted);
+  white-space: nowrap;
+}
+table.data thead th {
+  background: var(--bg);
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  position: sticky;
+  top: 0;
+}
+table.data tbody tr:hover {
+  background: var(--bg-hover);
+}
+table.data tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ===== pagination ===== */
+.pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.pagination .pages { display: flex; gap: 6px; }
+
+/* ===== detail header card ===== */
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.stock-header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.stock-header h1 {
+  font-size: 22px;
+  font-weight: 600;
+}
+.stock-header .code {
+  font-size: 14px;
+  color: var(--text-muted);
+  font-family: ui-monospace, monospace;
+}
+.stock-header .tags {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.metric-row {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.metric .label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.metric .value {
+  font-size: 18px;
+  font-family: ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== chart container ===== */
+.chart-card {
+  margin-top: 16px;
+  padding: 0;
+  overflow: hidden;
+}
+.chart-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-muted);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.chart-toolbar .range-group {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.chart-toolbar .range-group button {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.chart-toolbar .range-group button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.chart-toolbar .range-group button.active {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+.chart-toolbar .toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.chart-body {
+  width: 100%;
+  height: 480px;
+  position: relative;
+}
+
+/* ===== empty/error states ===== */
+.empty {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+.error {
+  padding: 20px;
+  border: 1px solid var(--negative);
+  border-radius: var(--radius);
+  background: rgba(248, 81, 73, 0.08);
+  color: var(--negative);
+}
