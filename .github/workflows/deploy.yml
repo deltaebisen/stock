@@ -28,12 +28,14 @@ jobs:
             --exclude='*.log' \
             "${{ github.workspace }}/" "$NAS_WORKSPACE/"
 
-      - name: Ensure Next.js dev server is up
+      - name: Rebuild and restart Next.js server
         run: |
           # bash 経由で invoke (file の x bit に依存しないため)。
           # run.sh 内の SCRIPT_DIR がホスト絶対パスとして解決される必要があるので
           # NAS_WORKSPACE 配下のパスで叩く。
-          bash "$NAS_WORKSPACE/run.sh" web
+          # web-rebuild は強制再起動 (rsync された新コードを反映)。
+          # .next/ は named volume なので Turbopack incremental cache で 2 回目以降の build は速い。
+          bash "$NAS_WORKSPACE/run.sh" web-rebuild
 
       - name: Show deployed commit
         run: |

@@ -28,10 +28,10 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ./run.sh prices-one DATE    # 1 日だけ取得 (テスト用 / YYYY-MM-DD)
 ./run.sh shell              # Python worker に bash で入る
 ./run.sh web-init           # Next.js 雛形を ./frontend に生成 (初回のみ)
-./run.sh web                # Next.js dev サーバー起動 (detached, idempotent / port 3000)
-./run.sh web-logs           # Next.js dev のログ追跡
-./run.sh web-restart        # Next.js dev を再起動
-./run.sh web-stop           # Next.js dev を停止
+./run.sh web                # Next.js を build + start で常駐起動 (idempotent / port 3000)
+./run.sh web-rebuild        # 強制再 build + 再起動 (CI deploy が叩く)
+./run.sh web-logs           # Next.js のログ追跡
+./run.sh web-stop           # Next.js を停止
 ```
 
 `run.sh` は `backend/src/` と `frontend/` をボリュームマウントするので、コード変更は再ビルド不要で即反映される。
@@ -92,7 +92,10 @@ pymysql は `NaN` を受け付けない (`nan can not be used with MySQL`)。一
 ### Web (Next.js)
 
 `./run.sh web-init` で `frontend/` 配下に Next.js 16 App Router 製の雛形が生成される (TS, no Tailwind, no src dir, Turbopack, app router)。
-`./run.sh web` は dev サーバーを `--network host` で起動 (`-H 0.0.0.0` で LAN 公開)。`-d --restart unless-stopped` で常駐 (SSH 切断 / NAS 再起動でも生存)、既に動いていれば no-op なので deploy.yml から毎回叩いても安全。
+
+`./run.sh web` は `npm install && npm run build && npm run start -- -H 0.0.0.0` を `--network host` 上の detached + `--restart unless-stopped` コンテナで動かす。**dev サーバーではなく production build を使う**理由: `next dev` (Turbopack) は TTY 無し環境で stdin EOF を quit シグナルとして扱い、Ready の数秒後に exit 0 で死んで restart loop に陥るため (NAS 上で再現確認済)。`next start` は安定 + メモリ消費も少ない。
+
+`web` は idempotent (既に起動中なら no-op)。CI deploy は `web-rebuild` を叩いて強制再 build + 再起動する。`.next/` は named volume なので Turbopack incremental cache が効いて 2 回目以降の build はそこそこ速い。
 
 DB アクセスは Server Component から直接 `mysql2/promise` で行う想定 (API route は不要)。
 DB 接続情報は `--env-file .env` でコンテナに注入され、`process.env.DB_*` で参照する。
@@ -107,7 +110,7 @@ DB 接続情報は `--env-file .env` でコンテナに注入され、`process.e
 1. `actions/checkout` で runner 内部の workspace にコード取得
 2. `rsync` で `$NAS_WORKSPACE` (= NAS の `/mnt/public/develop/stock/`) に展開
 3. `.env`, `data/`, `frontend/node_modules/`, `frontend/.next/` 等は除外 (NAS 側の値を保持)
-4. `bash $NAS_WORKSPACE/run.sh web` で Next.js dev を ensure (既に動いていれば no-op)
+4. `bash $NAS_WORKSPACE/run.sh web-rebuild` で Next.js を強制再 build + 再起動 (新コード反映)
 
 **`$NAS_WORKSPACE` が何故必要か (DinD sibling container の罠)**:
 runner は `docker.sock` をマウントして sibling container を spawn する設計。runner 内で
@@ -119,7 +122,7 @@ runner は `docker.sock` をマウントして sibling container を spawn す�
 sibling container の volume mount が成立する。
 
 **自動再起動の方針**:
-- Next.js dev は deploy 後に `./run.sh web` を ensure 呼びするが、既起動なら no-op で fast-refresh に任せる
+- Next.js は deploy のたびに `./run.sh web-rebuild` で再 build + 再起動 (production build なので fast-refresh は無く、deploy = 完全リフレッシュ)
 - 長時間バッチ (`stock-prices` 等) は実行途中なら割り込みたくないので手動 `docker restart` で対応
 - `Dockerfile` / `requirements.txt` を変えた時は手動で `./run.sh build` し直す
 
