@@ -113,6 +113,8 @@ case "${1:-}" in
     # 既に起動中なら no-op (rebuild したい場合は web-rebuild を呼ぶ)。
     # next dev は TTY 無し環境で stdin EOF をトリガに exit する挙動があり
     # restart loop に陥るため、NAS では next start (production) を採用する。
+    # --webpack: Next.js 16 default の Turbopack は alpine musl-arm64 で
+    # native binary (SWC + Turbo Engine) が Bus error 起こすので Webpack に倒す。
     if [ ! -f "$SCRIPT_DIR/frontend/package.json" ]; then
       echo "Error: ./frontend/package.json not found. Run '$0 web-init' first."
       exit 1
@@ -132,7 +134,7 @@ case "${1:-}" in
       -v stock-web-next-cache:/app/.next \
       -w /app \
       node:22-alpine \
-      sh -c "npm install && npm run build && npm run start -- -H 0.0.0.0"
+      sh -c "npm install && npm run build -- --webpack && npm run start -- -H 0.0.0.0"
     echo ""
     echo "起動中 (http://<nas-ip>:3000)。初回は npm install + build 待ちで 2〜5 分。"
     echo "  ログ:        docker logs -f stock-web"
@@ -143,8 +145,8 @@ case "${1:-}" in
 
   web-rebuild)
     # 強制再起動 (新コード反映)。CI deploy はこっちを叩く。
-    # .next/ は named volume なので Turbopack の incremental cache が効いて
-    # 2 回目以降の build はそこそこ速い。
+    # .next/ は named volume なので Webpack の incremental cache が効いて
+    # 2 回目以降の build はそこそこ速い (--webpack 採用理由は web case コメント参照)。
     if [ ! -f "$SCRIPT_DIR/frontend/package.json" ]; then
       echo "Error: ./frontend/package.json not found."
       exit 1
@@ -160,7 +162,7 @@ case "${1:-}" in
       -v stock-web-next-cache:/app/.next \
       -w /app \
       node:22-alpine \
-      sh -c "npm install && npm run build && npm run start -- -H 0.0.0.0"
+      sh -c "npm install && npm run build -- --webpack && npm run start -- -H 0.0.0.0"
     echo "再 build 起動中。ログ: docker logs -f stock-web"
     ;;
 
