@@ -67,10 +67,6 @@ export default async function StockDetailPage({
               {summary.first_date ?? "—"} 〜
             </span>
           </div>
-          <div className="metric">
-            <span className="label">日足本数</span>
-            <span className="value">{fmtNumber(summary.row_count)}</span>
-          </div>
         </div>
       </div>
 
@@ -83,48 +79,6 @@ export default async function StockDetailPage({
       ) : (
         <PriceChart quotes={quotes} />
       )}
-
-      <div style={{ marginTop: 16 }}>
-        <h2 style={{ fontSize: 14, color: "var(--text-muted)", marginBottom: 8, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.04em" }}>
-          直近 20 営業日
-        </h2>
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr>
-                <th>日付</th>
-                <th className="num">始値</th>
-                <th className="num">高値</th>
-                <th className="num">安値</th>
-                <th className="num">終値</th>
-                <th className="num">前日比</th>
-                <th className="num">出来高</th>
-              </tr>
-            </thead>
-            <tbody>
-              {quotes
-                .slice(-20)
-                .reverse()
-                .map((q, i, arr) => {
-                  const prevClose = arr[i + 1]?.close ?? null;
-                  const c = changePct(q.close, prevClose);
-                  const cls = c === null ? "" : c > 0 ? "pos" : c < 0 ? "neg" : "";
-                  return (
-                    <tr key={q.trade_date}>
-                      <td className="mono">{q.trade_date}</td>
-                      <td className="num mono">{fmtPrice(q.open)}</td>
-                      <td className="num mono">{fmtPrice(q.high)}</td>
-                      <td className="num mono">{fmtPrice(q.low)}</td>
-                      <td className="num mono">{fmtPrice(q.close)}</td>
-                      <td className={`num mono ${cls}`}>{fmtPercent(c)}</td>
-                      <td className="num mono">{fmtNumber(q.volume)}</td>
-                    </tr>
-                  );
-                })}
-            </tbody>
-          </table>
-        </div>
-      </div>
     </>
   );
 }

@@ -312,12 +312,14 @@ table.data tbody tr:last-child td {
   gap: 6px;
   color: var(--text-muted);
   font-size: 12px;
+}
+.chart-toolbar .toggle:first-of-type {
   margin-left: auto;
 }
 
 .chart-body {
   width: 100%;
-  height: 480px;
+  height: 640px;
   position: relative;
 }
 
