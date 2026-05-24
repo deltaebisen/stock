@@ -50,6 +50,98 @@ case "${1:-}" in
       "$IMAGE_NAME" python -m src.fetch_calendar
     ;;
 
+  edinet-codes)
+    # EDINET 公式の事業者コード一覧 (証券コード <-> EDINET コード)
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "$IMAGE_NAME" python -m src.fetch_edinet_codes
+    ;;
+
+  edinet-docs)
+    # EDINET 提出書類メタの bulk 取得 (デフォルト 5 年) - 前景
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "$IMAGE_NAME" python -m src.fetch_edinet_documents
+    ;;
+
+  edinet-docs-bg)
+    # bulk 取得 (デタッチ / SSH 切断耐性)
+    docker rm -f stock-edinet-docs 2>/dev/null || true
+    docker run -d \
+      --name stock-edinet-docs \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "$IMAGE_NAME" python -m src.fetch_edinet_documents
+    echo ""
+    echo "起動済み。ログ追跡: docker logs -f stock-edinet-docs"
+    echo "状態確認:     docker ps -a --filter name=stock-edinet-docs"
+    echo "停止:         docker stop stock-edinet-docs"
+    ;;
+
+  edinet-docs-diff)
+    # 差分のみ (DB の最新 submit_datetime 以降を今日まで再取得)
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -e FETCH_MODE=diff \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "$IMAGE_NAME" python -m src.fetch_edinet_documents
+    ;;
+
+  xbrl)
+    # EDINET XBRL を arelle で DL → parse → financial_facts に展開 (前景)
+    # parsed_at IS NULL のレコードを自然に拾うので「差分」コマンドは不要
+    # 環境変数 LIMIT (1 ジョブの doc 上限) / DOC_TYPES (対象 doc_type_code カンマ区切り) を
+    # 受け取って docker に passthrough する (e.g. LIMIT=1 ./run.sh xbrl で smoke test)
+    # arelle web cache は名前付き volume stock-arelle-cache に永続化 (EDINET タクソノミ ~10MB の
+    # 再 DL を避ける)。コンテナ再作成しても cache 維持
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -e LIMIT="${LIMIT:-}" \
+      -e DOC_TYPES="${DOC_TYPES:-}" \
+      -e ARELLE_CACHE_DIR=/app/data/arelle-cache \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      -v stock-arelle-cache:/app/data/arelle-cache \
+      "$IMAGE_NAME" python -m src.parse_xbrl
+    ;;
+
+  xbrl-bg)
+    # 同上をデタッチ (5 年フル parse は arelle で doc 1 件 ~5-10 秒 × 数万件 = 数時間〜半日)
+    docker rm -f stock-xbrl 2>/dev/null || true
+    docker run -d \
+      --name stock-xbrl \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -e LIMIT="${LIMIT:-}" \
+      -e DOC_TYPES="${DOC_TYPES:-}" \
+      -e ARELLE_CACHE_DIR=/app/data/arelle-cache \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      -v stock-arelle-cache:/app/data/arelle-cache \
+      "$IMAGE_NAME" python -m src.parse_xbrl
+    echo ""
+    echo "起動済み。ログ追跡: docker logs -f stock-xbrl"
+    echo "状態確認:     docker ps -a --filter name=stock-xbrl"
+    echo "停止:         docker stop stock-xbrl"
+    ;;
+
   prices)
     docker run --rm \
       --network host \
@@ -213,12 +305,18 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: $0 {build|listed|calendar|calendar-diff|prices|prices-bg|prices-diff|prices-one|backtest|shell|web-init|web|web-rebuild|web-logs|web-stop}"
+    echo "Usage: $0 {build|listed|calendar|calendar-diff|edinet-codes|edinet-docs|edinet-docs-bg|edinet-docs-diff|xbrl|xbrl-bg|prices|prices-bg|prices-diff|prices-one|backtest|shell|web-init|web|web-rebuild|web-logs|web-stop}"
     echo ""
     echo "  build              Build backend image (Python worker)"
     echo "  listed             Fetch listed companies master"
     echo "  calendar           Fetch trading calendar (full, default 5 years + 翌年末まで)"
     echo "  calendar-diff      Fetch trading calendar (only new dates)"
+    echo "  edinet-codes       Fetch EDINET 事業者コード一覧 (週次想定)"
+    echo "  edinet-docs        Fetch EDINET 提出書類メタ (full, default 5 years)"
+    echo "  edinet-docs-bg     Same but detached"
+    echo "  edinet-docs-diff   Fetch EDINET 提出書類メタ (DB 最新以降のみ)"
+    echo "  xbrl               Parse EDINET XBRL → financial_facts (parsed_at NULL 全件、foreground)"
+    echo "  xbrl-bg            Same but detached"
     echo "  prices             Fetch daily prices (full, default 5 years / Light plan, foreground)"
     echo "  prices-bg          Fetch daily prices (full, detached / SSH切断耐性)"
     echo "  prices-diff        Fetch daily prices (only new dates)"

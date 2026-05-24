@@ -24,6 +24,12 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ./run.sh listed             # 銘柄マスタ取得
 ./run.sh calendar           # 営業日カレンダー取得 (full)
 ./run.sh calendar-diff      # 営業日カレンダー差分取得 (月次運用想定)
+./run.sh edinet-codes       # EDINET 事業者コード (証券コード↔EDINETコード) 取得
+./run.sh edinet-docs        # EDINET 提出書類メタ (5 年分) 取得 (前景)
+./run.sh edinet-docs-bg     # 同 (デタッチ / 30 分〜)
+./run.sh edinet-docs-diff   # EDINET 提出書類メタ差分取得
+./run.sh xbrl               # 未 parse な edinet_documents の XBRL を financial_facts に展開 (前景)
+./run.sh xbrl-bg            # 同 (デタッチ / 長時間)
 ./run.sh prices             # 日足フル取得 (前景)
 ./run.sh prices-bg          # 日足フル取得 (デタッチ / SSH切断耐性)
 ./run.sh prices-diff        # 日足差分取得 (DB の最新日付以降のみ)
@@ -45,7 +51,7 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ### 初回セットアップで必須
 
 - `backend/sql/init.sql` 中の `CHANGE_ME_STRONG_PASSWORD` を実値に置換してから流す (3 箇所)
-- `.env` は `.env.example` をコピーして `JQUANTS_API_KEY` と `DB_PASSWORD` を埋める (NAS 側では追加で `RUNNER_PAT` も埋める — CI/CD 用)
+- `.env` は `.env.example` をコピーして `JQUANTS_API_KEY` / `EDINET_API_KEY` / `DB_PASSWORD` を埋める (NAS 側では追加で `RUNNER_PAT` も埋める — CI/CD 用)
 - CI/CD を有効にする手順は `README.md` の「CI/CD」セクションに集約 (runner image を scp、PAT を発行、`setup-runner.sh` 実行)
 
 ## Architecture
@@ -93,7 +99,43 @@ pymysql は `NaN` を受け付けない (`nan can not be used with MySQL`)。一
 
 ### fetch_log の使い方
 
-`fetch_log` テーブルはジョブの履歴管理。`job_type` で種別 (`listed_info` / `daily_quotes` (個別日付エラー) / `daily_quotes_bulk` (バルク完了サマリ)) を区別する。差分ジョブのトラブルシューティングはまずここを見る。
+`fetch_log` テーブルはジョブの履歴管理。`job_type` で種別 (`listed_info` / `daily_quotes` (個別日付エラー) / `daily_quotes_bulk` (バルク完了サマリ) / `edinet_code_mapping` / `edinet_documents` / `edinet_documents_bulk` / `xbrl_parse_bulk`) を区別する。差分ジョブのトラブルシューティングはまずここを見る。
+
+### EDINET 連携 (財務指標用)
+
+J-Quants Light プランでは時価総額 / PER / PBR / EPS / BPS / ROE 等が取れないので、金融庁 EDINET (無料) から XBRL を取得して財務情報を埋める。3 段階構成:
+
+1. **`edinet_code_mapping`** (`./run.sh edinet-codes`)
+   - EDINET 公式 ZIP (Shift-JIS CSV) を直 URL から取得 → 証券コード ↔ EDINET コード (E########) の対応表
+   - 週次更新で十分。`/equities/master` の 4 桁証券コードと JOIN するときは末尾 0 を切って正規化する (J-Quants 側と同ルール)
+
+2. **`edinet_documents`** (`./run.sh edinet-docs[-bg|-diff]`)
+   - `/api/v2/documents.json` を日付ループで回して提出書類メタを蓄積
+   - 5 年フル ≈ 1800 リクエスト × 1 秒 = 30 分。SSH 切断耐性は `edinet-docs-bg`
+   - `parsed_at` カラム NULL のレコードを `parse_xbrl` が拾って財務化する
+
+3. **`financial_facts`** (`./run.sh xbrl[-bg]`、`backend/src/parse_xbrl.py`)
+   - 未 parse な `edinet_documents` を 1 件ずつ EDINET API `/documents/{docID}?type=1` で ZIP DL
+   - ZIP 内 `XBRL/PublicDoc/*.xbrl` (無ければ `*.htm` iXBRL fallback) を **`arelle` (XBRL 2.1 reference implementation)** で load
+     - DTS (schema + linkbase) を辿って concept type / dimension / unit を完全解決
+     - tuple 子要素は `modelTupleFacts` を再帰展開してフラットに出す
+     - fraction (numerator/denominator) は arelle の `fact.fractionValue` から計算済み値を入れる
+   - 全ファクトを 1 行 1 ファクトの **EAV テーブル `financial_facts`** に投入 (`(doc_id, element_id, context_ref)` PK)
+   - フラットなワイドテーブルではなく EAV にした理由: J-GAAP / IFRS で要素名が異なり、連結/単体/前期/前々期 等のコンテキスト次元が爆発するため、ワイドだと無限に列が増える。EAV なら 1 スキーマで全部入る + frontend では view か materialized table で必要な部分だけ pivot すればいい
+   - 数値ファクト (numeric concept) → `value_num` (DECIMAL(28,4))、それ以外 (date / boolean / string / DEI 系) → `value_text` (MEDIUMTEXT)
+   - 各 fact には `item_type` (concept の XBRL item type: `monetaryItemType` / `sharesItemType` / `pureItemType` / `dateItemType` 等) を保持。screening 時に「monetary だけ」「per-share だけ」で絞るときに使う
+   - `unit_ref` は arelle が解決した unit 文字列 (`iso4217:JPY` / `xbrli:shares` / `iso4217:JPY/xbrli:shares` (per-share))
+   - **`textBlockItemType` または element 名末尾 `TextBlock` はスキップ**。screening 用途では使わないし textBlock は容量を食う割に検索性が低い
+   - element_id は `prefix:localname` 形式 (例: `jppfs_cor:NetSales` / `jpdei_cor:AccountingStandardsDEI`)。prefix が無い名前空間 (極稀) は `{URI}local` で識別
+   - 対象 doc_type_code は `120` (有価証券報告書), `130` (訂正有報), `140`/`150` (四半期/訂正、廃止予定), `160`/`170` (半期/訂正)。`DOC_TYPES` 環境変数で絞れる
+   - `parsed_at` を見て自然に差分実行になる (失敗した doc も `parse_error` を残したうえで `parsed_at` を立てるので、リトライしたい場合は `UPDATE edinet_documents SET parsed_at=NULL, parse_error=NULL WHERE parse_error IS NOT NULL`)
+   - **初回のスピード**: arelle が DTS 解決時に EDINET 公式タクソノミ (~10MB) を `disclosure2dl.edinet-fsa.go.jp` から HTTP 取得。1 件目だけ 30〜60 秒。同タクソノミバージョンの 2 件目以降は WebCache hit で 5〜10 秒/件
+   - **WebCache の永続化**: arelle の cache は `stock-arelle-cache` 名前付き volume にマウント (`/app/data/arelle-cache`)。`ARELLE_CACHE_DIR` で変更可能。コンテナ再作成・image rebuild しても cache 維持
+   - **arelle 側の rate limit**: arelle 自身は HTTP fetch に rate limit を持たないので、DTS 解決時に `disclosure2dl.edinet-fsa.go.jp` に 5〜10 req/sec で burst を打ってしまう。EDINET API v2 側 (EdinetClient) と同等の負荷に揃えるため、`_install_throttled_opener()` で `webCache.opener.open` を **1 req/sec** に絞ってある (`ARELLE_HTTP_MIN_INTERVAL` 秒で調整可、デフォルト 1.0)。cache hit のときは opener が呼ばれないので throttle のオーバーヘッドゼロ
+   - 5 年フル parse は doc 数万件 × 5〜10 秒/件 = 数時間〜半日。必ず `xbrl-bg`
+   - **smoke test 推奨**: `LIMIT=1 ./run.sh xbrl` で 1 件流して fact 数が数百〜千件程度になることを確認してから bulk へ
+
+EDINET API v2 は **API キーをクエリパラメータ `Subscription-Key` で渡す** (ヘッダではない)。レート制限は明示されてないが安全側で 1 req/sec (`EDINET_RATE_PER_SEC` で調整可)。
 
 ### バックテスト
 
