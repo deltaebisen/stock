@@ -27,8 +27,9 @@ jobs:
 
       - name: Ensure Next.js dev server is up
         run: |
-          cd /workspace
-          ./run.sh web
+          # runner container の uid と /workspace の uid が一致せず
+          # ./run.sh の x bit が刺さらないことがあるので bash で直接 invoke
+          bash /workspace/run.sh web
 
       - name: Show deployed commit
         run: |
