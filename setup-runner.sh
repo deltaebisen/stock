@@ -73,15 +73,20 @@ docker run -d \
   -e ACCESS_TOKEN="${RUNNER_PAT}" \
   -e RUNNER_WORKDIR="/tmp/runner-work" \
   -e LABELS="self-hosted,nas,arm64" \
-  -e EPHEMERAL="false" \
   -e NAS_WORKSPACE="${SCRIPT_DIR}" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "${SCRIPT_DIR}:${SCRIPT_DIR}" \
   myoung34/github-runner:latest
 
-# 注: -v "${SCRIPT_DIR}:${SCRIPT_DIR}" でホストと同じパスにマウントしている。
+# 注 1: -v "${SCRIPT_DIR}:${SCRIPT_DIR}" でホストと同じパスにマウントしている。
 # runner は docker.sock 経由で sibling container を spawn するが、その時の volume
 # パス指定はホスト Docker daemon に渡されるためホスト視点でのパスが必要。
+#
+# 注 2: EPHEMERAL は **絶対に渡さない** (unset = persistent)。
+# myoung34/github-runner の start.sh は `[[ -n "${EPHEMERAL}" ]]` で判定するので、
+# `EPHEMERAL=false` を渡しても "非空文字列" として ephemeral mode に倒れる。
+# ephemeral runner はジョブ 1 つ取ったら deregister → exit するので、--restart always
+# で再起動するたび GitHub 側 Runners 一覧から一瞬消えるフリッカー状態になる。
 # `${SCRIPT_DIR}:/workspace` のように違う名前にすると run.sh が SCRIPT_DIR を
 # `/workspace` と認識して `docker run -v /workspace/frontend:/app` をホスト側に
 # 投げ、ホストに /workspace が無いので空マウントになり package.json が見えない。
