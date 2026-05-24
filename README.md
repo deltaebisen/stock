@@ -116,20 +116,30 @@ git remote add origin git@github.com:<owner>/<repo>.git
 git push -u origin main
 ```
 
-**2. runner image を NAS に持ち込み**
+**2. runner image と node image を NAS に持ち込み**
+
+NAS は docker pull できないので、Windows 側で pull → save → scp → NAS で load する。
+`/mnt/public/develop/stock/` は CI 由来の所有権で `shoootake` 書き込み不可なので
+home (`~/`) に scp してから load する。
 
 Windows 側で:
-```powershell
+```bash
+# 1. GitHub Actions runner
 docker pull --platform linux/arm64 myoung34/github-runner:latest
 docker save myoung34/github-runner:latest | gzip > github-runner.tar.gz
-scp -P 9222 github-runner.tar.gz shoootake@192.168.10.2:/mnt/public/develop/stock/
+scp -P 9222 github-runner.tar.gz shoootake@192.168.10.2:~/
+
+# 2. Next.js 用 node ランタイム (alpine の musl-arm64 だと SWC が SIGBUS で死ぬので debian)
+docker pull --platform linux/arm64 node:22-bookworm-slim
+docker save node:22-bookworm-slim | gzip > node22-bookworm-slim-arm64.tar.gz
+scp -P 9222 node22-bookworm-slim-arm64.tar.gz shoootake@192.168.10.2:~/
 ```
 
 NAS 側で:
 ```bash
-cd /mnt/public/develop/stock
-gunzip -c github-runner.tar.gz | docker load
-rm github-runner.tar.gz
+gunzip -c ~/github-runner.tar.gz | docker load
+gunzip -c ~/node22-bookworm-slim-arm64.tar.gz | docker load
+rm ~/github-runner.tar.gz ~/node22-bookworm-slim-arm64.tar.gz
 ```
 
 **3. PAT (Personal Access Token) を発行**

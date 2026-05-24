@@ -103,7 +103,7 @@ case "${1:-}" in
     docker run --rm -it \
       -v "$SCRIPT_DIR/frontend:/app" \
       -w /app \
-      node:22-alpine \
+      node:22-bookworm-slim \
       npx create-next-app@latest . --typescript --app --use-npm --eslint --no-tailwind --no-src-dir --no-import-alias --turbopack
     ;;
 
@@ -133,7 +133,7 @@ case "${1:-}" in
       -v stock-web-node-modules:/app/node_modules \
       -v stock-web-next-cache:/app/.next \
       -w /app \
-      node:22-alpine \
+      node:22-bookworm-slim \
       sh -c "npm install && npm run build -- --webpack && npm run start -- -H 0.0.0.0"
     echo ""
     echo "起動中 (http://<nas-ip>:3000)。初回は npm install + build 待ちで 2〜5 分。"
@@ -161,7 +161,7 @@ case "${1:-}" in
       -v stock-web-node-modules:/app/node_modules \
       -v stock-web-next-cache:/app/.next \
       -w /app \
-      node:22-alpine \
+      node:22-bookworm-slim \
       sh -c "npm install && npm run build -- --webpack && npm run start -- -H 0.0.0.0"
     echo "再 build 起動中。ログ: docker logs -f stock-web"
     ;;
