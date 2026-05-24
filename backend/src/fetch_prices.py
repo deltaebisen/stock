@@ -49,6 +49,21 @@ def get_latest_date(engine):
     return row[0] if row and row[0] else None
 
 
+def load_trading_days(engine, from_date: date, to_date: date) -> set | None:
+    """trading_calendar から営業日 set を返す。テーブルが空なら None (フォールバックさせる)。"""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT trade_date FROM trading_calendar "
+                "WHERE trade_date BETWEEN :fd AND :td AND is_trading = 1"
+            ),
+            {"fd": from_date, "td": to_date},
+        ).fetchall()
+    if not rows:
+        return None
+    return {r[0] for r in rows}
+
+
 def insert_quotes(engine, df):
     if df.empty:
         return 0
@@ -78,15 +93,26 @@ def fetch_by_date_range(client, engine, from_date: date, to_date: date):
     total = 0
     fail_count = 0
 
+    # 営業日 set を一括ロード (DB 1 クエリ)。trading_calendar 未取得なら weekday フォールバック
+    trading_days = load_trading_days(engine, from_date, to_date)
+    if trading_days is None:
+        print("[fetch_prices] trading_calendar 未取得 → weekday>=5 フォールバック")
+    else:
+        print(f"[fetch_prices] trading_calendar から {len(trading_days)} 営業日を取得")
+
     for d in daterange(from_date, to_date):
-        if d.weekday() >= 5:  # 土日スキップ
-            continue
+        if trading_days is not None:
+            if d not in trading_days:
+                continue
+        else:
+            if d.weekday() >= 5:  # 土日スキップ (fallback)
+                continue
 
         date_str = d.strftime("%Y-%m-%d")
         try:
             quotes = client.get_daily_quotes(date=date_str)
             if not quotes:
-                # 祝日など
+                # trading_calendar 上では営業日でも上場銘柄 0 件のレア cases (上場前 / 全銘柄 SQ 等)
                 continue
 
             df = pd.DataFrame(quotes)

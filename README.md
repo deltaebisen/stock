@@ -64,10 +64,14 @@ vi .env
 # 2. 銘柄マスタ取得 (まず疎通確認)
 ./run.sh listed
 
-# 3. 日足フル取得 (時間かかる)
+# 3. 営業日カレンダー取得 (祝日判定用 / 過去 5 年 + 翌年末まで)
+./run.sh calendar
+
+# 4. 日足フル取得 (時間かかる)
 ./run.sh prices
 
 # 日次差分更新
+./run.sh calendar-diff   # 月次でも可
 ./run.sh prices-diff
 
 # コンテナ内に入って調査

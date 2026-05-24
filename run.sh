@@ -29,6 +29,27 @@ case "${1:-}" in
       "$IMAGE_NAME" python -m src.fetch_listed
     ;;
 
+  calendar)
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "$IMAGE_NAME" python -m src.fetch_calendar
+    ;;
+
+  calendar-diff)
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -e FETCH_MODE=diff \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "$IMAGE_NAME" python -m src.fetch_calendar
+    ;;
+
   prices)
     docker run --rm \
       --network host \
@@ -175,10 +196,12 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: $0 {build|listed|prices|prices-bg|prices-diff|prices-one|shell|web-init|web|web-rebuild|web-logs|web-stop}"
+    echo "Usage: $0 {build|listed|calendar|calendar-diff|prices|prices-bg|prices-diff|prices-one|shell|web-init|web|web-rebuild|web-logs|web-stop}"
     echo ""
     echo "  build              Build backend image (Python worker)"
     echo "  listed             Fetch listed companies master"
+    echo "  calendar           Fetch trading calendar (full, default 5 years + 翌年末まで)"
+    echo "  calendar-diff      Fetch trading calendar (only new dates)"
     echo "  prices             Fetch daily prices (full, default 5 years / Light plan, foreground)"
     echo "  prices-bg          Fetch daily prices (full, detached / SSH切断耐性)"
     echo "  prices-diff        Fetch daily prices (only new dates)"

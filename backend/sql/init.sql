@@ -72,6 +72,19 @@ CREATE TABLE IF NOT EXISTS daily_quotes (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================
+-- 営業日カレンダー (V2: /markets/trading_calendar)
+-- holiday_division: '0'=非営業日 / '1'=営業日 / '2'=東証半日立会 / '3'=祝日取引可能日
+-- is_trading は '1' or '2' のとき TRUE (半日立会も日足は出るので営業日扱い)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS trading_calendar (
+  trade_date DATE PRIMARY KEY,
+  holiday_division CHAR(1) NOT NULL,
+  is_trading TINYINT(1) NOT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_is_trading (is_trading)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
 -- 取得ジョブ管理
 -- ============================================================
 CREATE TABLE IF NOT EXISTS fetch_log (
