@@ -132,21 +132,30 @@ gunzip -c github-runner.tar.gz | docker load
 rm github-runner.tar.gz
 ```
 
-**3. runner 登録 token を取得**
+**3. PAT (Personal Access Token) を発行**
 
-GitHub repo > Settings > Actions > Runners > "New self-hosted runner" を開くと、
-ARM64 Linux 用のセットアップ画面が出る。そこに `./config.sh --url ... --token XXXX` のような
-コマンドが表示されるので **token (`XXXX` の部分) をコピー** する (1 時間で失効)。
+GitHub > 右上アバター > Settings > Developer settings > Personal access tokens >
+**Fine-grained tokens** > Generate new token:
+
+- Resource owner: `deltaebisen` (対象 repo の owner)
+- Repository access: **Only select repositories** → 対象 repo のみ
+- Repository permissions: **Administration: Read and write**
+- Expiration: 任意 (無期限 or 1 年)
+
+発行された `github_pat_...` を控える。
+
+短期失効する registration token (1h) ではなく PAT を使うことで、コンテナ再起動・NAS 再起動・
+GitHub 側で deregister されたケースも、起動時に自動で再登録される (毎回 token 取り直し不要)。
 
 **4. runner 起動**
 
 ```bash
-./setup-runner.sh <owner>/<repo> <token>
+./setup-runner.sh <owner>/<repo> <PAT>
 docker logs -f stock-runner   # "Listening for Jobs" が出れば成功
 ```
 
 GitHub repo > Settings > Actions > Runners の画面で `nas-runner` が **Idle** に
-なっていれば登録完了。
+なっていれば登録完了。以降は触らなくて良い。
 
 ### 動作確認
 

@@ -1,6 +1,11 @@
 #!/bin/bash
 # GitHub Actions self-hosted runner を NAS 上の Docker コンテナとして起動する。
 #
+# PAT (Personal Access Token) 方式:
+#   ACCESS_TOKEN を渡すと myoung34/github-runner が起動時に自分で registration token を
+#   発行して登録する。NAS 再起動・コンテナ再作成・GitHub 側で消えた場合も、起動するだけで
+#   自動的に再登録される。短期失効する registration token を毎回手で取る必要は無い。
+#
 # 事前準備:
 #   1. Windows 側で runner image を pull (ARM64):
 #        docker pull --platform linux/arm64 myoung34/github-runner:latest
@@ -9,23 +14,27 @@
 #   2. NAS 側で load:
 #        gunzip -c github-runner.tar.gz | docker load
 #        rm github-runner.tar.gz
-#   3. GitHub repo > Settings > Actions > Runners > "New self-hosted runner"
-#      で表示される登録 token をコピー (1時間で失効)
+#   3. GitHub > Settings > Developer settings > Personal access tokens > Fine-grained tokens
+#      で PAT を発行:
+#        - Resource owner: 対象 repo の owner
+#        - Repository access: Only select repositories → 対象 repo のみ
+#        - Repository permissions: Administration = Read and write
+#        - Expiration: 任意 (無期限 / 1 年など。失効したら作り直して再 setup)
 #
 # 使い方:
-#   ./setup-runner.sh <owner>/<repo> <runner_token>
-#   例: ./setup-runner.sh shoootake/stock ABCDEF1234567890...
+#   ./setup-runner.sh <owner>/<repo> <PAT>
+#   例: ./setup-runner.sh deltaebisen/stock github_pat_xxxxxxxxxxxxxxxxxxxx
 
 set -e
 
 if [ $# -ne 2 ]; then
-  echo "Usage: $0 <owner>/<repo> <runner_token>"
-  echo "Example: $0 shoootake/stock ABCDEF1234..."
+  echo "Usage: $0 <owner>/<repo> <personal_access_token>"
+  echo "Example: $0 deltaebisen/stock github_pat_xxxxxxxxxxxx"
   exit 1
 fi
 
 REPO="$1"
-TOKEN="$2"
+PAT="$2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 既存 runner を入れ替え
@@ -36,7 +45,7 @@ docker run -d \
   --restart always \
   -e REPO_URL="https://github.com/${REPO}" \
   -e RUNNER_NAME="nas-runner" \
-  -e RUNNER_TOKEN="${TOKEN}" \
+  -e ACCESS_TOKEN="${PAT}" \
   -e RUNNER_WORKDIR="/tmp/runner-work" \
   -e LABELS="self-hosted,nas,arm64" \
   -e EPHEMERAL="false" \
@@ -49,3 +58,4 @@ echo "Runner 起動済み。確認:"
 echo "  docker logs -f stock-runner"
 echo ""
 echo "GitHub repo > Settings > Actions > Runners で 'nas-runner' が Idle になれば成功"
+echo "(以降は NAS 再起動やコンテナ再作成でも自動再登録される)"
