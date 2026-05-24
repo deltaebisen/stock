@@ -25,6 +25,11 @@ jobs:
             --exclude='*.log' \
             "${{ github.workspace }}/" /workspace/
 
+      - name: Ensure Next.js dev server is up
+        run: |
+          cd /workspace
+          ./run.sh web
+
       - name: Show deployed commit
         run: |
           cd /workspace

@@ -27,8 +27,11 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ./run.sh prices-diff        # 日足差分取得 (DB の最新日付以降のみ)
 ./run.sh prices-one DATE    # 1 日だけ取得 (テスト用 / YYYY-MM-DD)
 ./run.sh shell              # Python worker に bash で入る
-./run.sh web-init           # Next.js 雛形を ./web に生成 (初回のみ)
-./run.sh web                # Next.js dev サーバー起動 (port 3000)
+./run.sh web-init           # Next.js 雛形を ./frontend に生成 (初回のみ)
+./run.sh web                # Next.js dev サーバー起動 (detached, idempotent / port 3000)
+./run.sh web-logs           # Next.js dev のログ追跡
+./run.sh web-restart        # Next.js dev を再起動
+./run.sh web-stop           # Next.js dev を停止
 ```
 
 `run.sh` は `backend/src/` と `frontend/` をボリュームマウントするので、コード変更は再ビルド不要で即反映される。
@@ -89,7 +92,7 @@ pymysql は `NaN` を受け付けない (`nan can not be used with MySQL`)。一
 ### Web (Next.js)
 
 `./run.sh web-init` で `frontend/` 配下に Next.js 16 App Router 製の雛形が生成される (TS, no Tailwind, no src dir, Turbopack, app router)。
-`./run.sh web` は dev サーバーを `--network host` で起動 (`-H 0.0.0.0` で LAN 公開)。
+`./run.sh web` は dev サーバーを `--network host` で起動 (`-H 0.0.0.0` で LAN 公開)。`-d --restart unless-stopped` で常駐 (SSH 切断 / NAS 再起動でも生存)、既に動いていれば no-op なので deploy.yml から毎回叩いても安全。
 
 DB アクセスは Server Component から直接 `mysql2/promise` で行う想定 (API route は不要)。
 DB 接続情報は `--env-file .env` でコンテナに注入され、`process.env.DB_*` で参照する。
@@ -104,9 +107,10 @@ DB 接続情報は `--env-file .env` でコンテナに注入され、`process.e
 1. `actions/checkout` で runner 内部の workspace にコード取得
 2. `rsync` で `/workspace`  (= NAS の `/mnt/public/develop/stock/`) に展開
 3. `.env`, `data/`, `frontend/node_modules/`, `frontend/.next/` 等は除外 (NAS 側の値を保持)
+4. `./run.sh web` を叩いて Next.js dev を ensure (既に動いていれば no-op)
 
-**自動再起動はしない**:
-- Next.js dev は fast-refresh で勝手に拾うので restart 不要
+**自動再起動の方針**:
+- Next.js dev は deploy 後に `./run.sh web` を ensure 呼びするが、既起動なら no-op で fast-refresh に任せる
 - 長時間バッチ (`stock-prices` 等) は実行途中なら割り込みたくないので手動 `docker restart` で対応
 - `Dockerfile` / `requirements.txt` を変えた時は手動で `./run.sh build` し直す
 
