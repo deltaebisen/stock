@@ -179,9 +179,10 @@ GitHub repo > Actions タブで Deploy ワークフローが走るのが見え�
 - `.env` と `data/` は workflow の rsync 対象外。NAS 側の値が保持される
 - 長時間ジョブ (例: `./run.sh prices-bg`) は deploy では自動再起動されない。コード変更を
   反映させたい時は手動で `docker restart stock-prices` する
-- Next.js dev (`./run.sh web`) は detached + `--restart unless-stopped` で常駐。deploy が
-  毎回 `./run.sh web` を ensure 呼びするが、既起動なら no-op で fast-refresh に任せる
-  (ブラウザリロードで反映)。手動操作は `./run.sh web-logs|web-restart|web-stop` で
+- Next.js (`./run.sh web`) は production build → start を detached + `--restart unless-stopped` で常駐。
+  deploy は `./run.sh web-rebuild` を叩いて毎回再 build + 再起動 (fast-refresh は無く完全リフレッシュ)。
+  next dev は NAS の TTY 無し環境で stdin EOF を quit と解釈して死ぬので production build を採用。
+  手動操作は `./run.sh web-logs|web-rebuild|web-stop` で
 - `Dockerfile` や `requirements.txt` を変えた時だけ手動で `./run.sh build` し直す
 
 ## 設計メモ

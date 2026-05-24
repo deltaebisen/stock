@@ -108,15 +108,17 @@ case "${1:-}" in
     ;;
 
   web)
-    # dev サーバー常駐起動 (detached + restart unless-stopped)。
+    # production build → start を detached で常駐 (--restart unless-stopped)。
     # NAS の MariaDB に 127.0.0.1:3306 で繋ぐため --network host。
-    # 既に起動中なら no-op (deploy 後の変更は fast-refresh が拾うので restart 不要)
+    # 既に起動中なら no-op (rebuild したい場合は web-rebuild を呼ぶ)。
+    # next dev は TTY 無し環境で stdin EOF をトリガに exit する挙動があり
+    # restart loop に陥るため、NAS では next start (production) を採用する。
     if [ ! -f "$SCRIPT_DIR/frontend/package.json" ]; then
       echo "Error: ./frontend/package.json not found. Run '$0 web-init' first."
       exit 1
     fi
     if [ -n "$(docker ps -q -f name=^stock-web$)" ]; then
-      echo "stock-web は既に起動中。ログ追跡: docker logs -f stock-web"
+      echo "stock-web は既に起動中。再 build したい場合は $0 web-rebuild"
       exit 0
     fi
     docker rm -f stock-web 2>/dev/null || true
@@ -130,21 +132,40 @@ case "${1:-}" in
       -v stock-web-next-cache:/app/.next \
       -w /app \
       node:22-alpine \
-      sh -c "npm install && npm run dev -- -H 0.0.0.0"
+      sh -c "npm install && npm run build && npm run start -- -H 0.0.0.0"
     echo ""
-    echo "起動済み (http://<nas-ip>:3000)。初回は npm install 待ちで 1〜2 分。"
-    echo "  ログ:    docker logs -f stock-web"
-    echo "  状態:    docker ps -a --filter name=stock-web"
-    echo "  再起動:  $0 web-restart"
-    echo "  停止:    $0 web-stop"
+    echo "起動中 (http://<nas-ip>:3000)。初回は npm install + build 待ちで 2〜5 分。"
+    echo "  ログ:        docker logs -f stock-web"
+    echo "  状態:        docker ps -a --filter name=stock-web"
+    echo "  再 build:    $0 web-rebuild"
+    echo "  停止:        $0 web-stop"
+    ;;
+
+  web-rebuild)
+    # 強制再起動 (新コード反映)。CI deploy はこっちを叩く。
+    # .next/ は named volume なので Turbopack の incremental cache が効いて
+    # 2 回目以降の build はそこそこ速い。
+    if [ ! -f "$SCRIPT_DIR/frontend/package.json" ]; then
+      echo "Error: ./frontend/package.json not found."
+      exit 1
+    fi
+    docker rm -f stock-web 2>/dev/null || true
+    docker run -d \
+      --name stock-web \
+      --restart unless-stopped \
+      --network host \
+      --env-file .env \
+      -v "$SCRIPT_DIR/frontend:/app" \
+      -v stock-web-node-modules:/app/node_modules \
+      -v stock-web-next-cache:/app/.next \
+      -w /app \
+      node:22-alpine \
+      sh -c "npm install && npm run build && npm run start -- -H 0.0.0.0"
+    echo "再 build 起動中。ログ: docker logs -f stock-web"
     ;;
 
   web-logs)
     docker logs -f stock-web
-    ;;
-
-  web-restart)
-    docker restart stock-web
     ;;
 
   web-stop)
@@ -152,7 +173,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: $0 {build|listed|prices|prices-bg|prices-diff|prices-one|shell|web-init|web|web-logs|web-restart|web-stop}"
+    echo "Usage: $0 {build|listed|prices|prices-bg|prices-diff|prices-one|shell|web-init|web|web-rebuild|web-logs|web-stop}"
     echo ""
     echo "  build              Build backend image (Python worker)"
     echo "  listed             Fetch listed companies master"
@@ -162,10 +183,10 @@ case "${1:-}" in
     echo "  prices-one DATE    Fetch daily prices for one date (YYYY-MM-DD)"
     echo "  shell              Open shell inside backend (debug)"
     echo "  web-init           Bootstrap Next.js scaffold into ./frontend (run once)"
-    echo "  web                Start Next.js dev server (detached, idempotent)"
-    echo "  web-logs           Tail Next.js dev server logs"
-    echo "  web-restart        Restart Next.js dev server"
-    echo "  web-stop           Stop and remove Next.js dev server"
+    echo "  web                Build + start Next.js (production, detached, idempotent)"
+    echo "  web-rebuild        Force rebuild + restart (used by CI deploy)"
+    echo "  web-logs           Tail Next.js logs"
+    echo "  web-stop           Stop and remove Next.js server"
     exit 1
     ;;
 esac
