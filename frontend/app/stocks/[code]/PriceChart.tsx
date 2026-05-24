@@ -137,7 +137,11 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
     // Pane 1: MACD
     const macdHist = chart.addSeries(
       HistogramSeries,
-      { priceFormat: { type: "price", precision: 2, minMove: 0.01 }, title: "Hist" },
+      {
+        priceFormat: { type: "price", precision: 2, minMove: 0.01 },
+        priceLineVisible: false,
+        lastValueVisible: false,
+      },
       1,
     );
     const macdLine = chart.addSeries(
@@ -146,8 +150,7 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
         color: "#58a6ff",
         lineWidth: 1,
         priceLineVisible: false,
-        lastValueVisible: true,
-        title: `MACD(${MACD_FAST},${MACD_SLOW})`,
+        lastValueVisible: false,
       },
       1,
     );
@@ -157,8 +160,7 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
         color: "#f7b955",
         lineWidth: 1,
         priceLineVisible: false,
-        lastValueVisible: true,
-        title: `Signal(${MACD_SIGNAL})`,
+        lastValueVisible: false,
       },
       1,
     );
@@ -183,28 +185,21 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
     };
   }, []);
 
-  // データ反映 (quotes / range / useAdjusted / トグル変更時)
+  // データ反映 (quotes / range / トグル変更時)
+  // 指標は **全期間** で計算 → 表示期間でスライスして series に渡す。
+  // (filtered な配列だけで SMA(75) や MACD を計算すると、短期間レンジで先頭が
+  //  warmup 不足になり値がガラリと変わってしまうため)
   useEffect(() => {
     const h = handlesRef.current;
     if (!h) return;
 
-    const cutoffMs = (() => {
-      const r = RANGES.find((r) => r.key === range);
-      if (!r || r.days === null) return null;
-      return Date.now() - r.days * 86400 * 1000;
-    })();
+    // 全期間の base 配列を組む (常に split / 併合調整後の価格を使う)
+    const allTimes: UTCTimestamp[] = [];
+    const allCandles: CandlestickData[] = [];
+    const allVolumes: (HistogramData | null)[] = [];
+    const allCloses: (number | null)[] = [];
 
-    const filtered = cutoffMs === null
-      ? quotes
-      : quotes.filter((q) => new Date(q.trade_date + "T00:00:00Z").getTime() >= cutoffMs);
-
-    const times: UTCTimestamp[] = [];
-    const candleData: CandlestickData[] = [];
-    const volumeData: HistogramData[] = [];
-    const closes: (number | null)[] = [];
-
-    // 常に split / 併合調整後の価格を使う (バックテスト前提)
-    for (const q of filtered) {
+    for (const q of quotes) {
       const o = q.adjustment_open ?? q.open;
       const high = q.adjustment_high ?? q.high;
       const l = q.adjustment_low ?? q.low;
@@ -212,30 +207,54 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
       const v = q.adjustment_volume ?? q.volume;
       if (o === null || high === null || l === null || c === null) continue;
       const time = toUnix(q.trade_date);
-      times.push(time);
-      candleData.push({ time, open: o, high: high, low: l, close: c });
-      closes.push(c);
-      if (v !== null) {
-        volumeData.push({
-          time,
-          value: v,
-          color: c >= o ? "rgba(63, 185, 80, 0.45)" : "rgba(248, 81, 73, 0.45)",
-        });
-      }
+      allTimes.push(time);
+      allCandles.push({ time, open: o, high, low: l, close: c });
+      allCloses.push(c);
+      allVolumes.push(
+        v === null
+          ? null
+          : {
+              time,
+              value: v,
+              color: c >= o ? "rgba(63, 185, 80, 0.45)" : "rgba(248, 81, 73, 0.45)",
+            },
+      );
     }
 
-    h.candle.setData(candleData);
-    h.volume.setData(volumeData);
+    // 指標を **全期間** で計算
+    const smaValues: Record<(typeof SMA_PERIODS)[number], (number | null)[]> = {
+      25: sma(allCloses, 25),
+      50: sma(allCloses, 50),
+      75: sma(allCloses, 75),
+    };
+    const macdValues = macd(allCloses, MACD_FAST, MACD_SLOW, MACD_SIGNAL);
+
+    // 表示期間でスライスする開始 index を決める
+    const cutoffMs = (() => {
+      const r = RANGES.find((r) => r.key === range);
+      if (!r || r.days === null) return null;
+      return Date.now() - r.days * 86400 * 1000;
+    })();
+    const cutoffSec = cutoffMs === null ? null : Math.floor(cutoffMs / 1000);
+    const startIdx =
+      cutoffSec === null
+        ? 0
+        : allTimes.findIndex((t) => (t as number) >= cutoffSec);
+    const sliceFrom = startIdx < 0 ? allTimes.length : startIdx;
+
+    // candle / volume を slice して set
+    h.candle.setData(allCandles.slice(sliceFrom));
+    h.volume.setData(allVolumes.slice(sliceFrom).filter((x): x is HistogramData => x !== null));
 
     // SMA
     if (showMA) {
       for (const p of SMA_PERIODS) {
         const series = h.smaSeries.get(p)!;
-        const values = sma(closes, p);
+        const values = smaValues[p];
         const data: LineData[] = [];
-        for (let i = 0; i < values.length; i++) {
+        for (let i = sliceFrom; i < values.length; i++) {
           const val = values[i];
-          if (val !== null) data.push({ time: times[i], value: val });
+          if (val !== null) data.push({ time: allTimes[i], value: val });
         }
         series.setData(data);
         series.applyOptions({ visible: true });
@@ -248,21 +267,20 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
 
     // MACD
     if (showMACD) {
-      const { macd: m, signal, histogram } = macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL);
       const macdData: LineData[] = [];
       const signalData: LineData[] = [];
       const histData: HistogramData[] = [];
-      for (let i = 0; i < times.length; i++) {
-        if (m[i] !== null) macdData.push({ time: times[i], value: m[i]! });
-        if (signal[i] !== null) signalData.push({ time: times[i], value: signal[i]! });
-        if (histogram[i] !== null) {
+      for (let i = sliceFrom; i < allTimes.length; i++) {
+        const m = macdValues.macd[i];
+        const s = macdValues.signal[i];
+        const hist = macdValues.histogram[i];
+        if (m !== null) macdData.push({ time: allTimes[i], value: m });
+        if (s !== null) signalData.push({ time: allTimes[i], value: s });
+        if (hist !== null) {
           histData.push({
-            time: times[i],
-            value: histogram[i]!,
-            color:
-              histogram[i]! >= 0
-                ? "rgba(63, 185, 80, 0.6)"
-                : "rgba(248, 81, 73, 0.6)",
+            time: allTimes[i],
+            value: hist,
+            color: hist >= 0 ? "rgba(63, 185, 80, 0.6)" : "rgba(248, 81, 73, 0.6)",
           });
         }
       }
