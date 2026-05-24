@@ -33,6 +33,10 @@ export function getPool(): mysql.Pool {
       charset: "utf8mb4",
       timezone: "+09:00",
       decimalNumbers: true,
+      // DATE/DATETIME を JS Date ではなく文字列で返す。
+      // Date のまま React child に渡すと "Objects are not valid as a React child" で 500。
+      // server / client 境界でのシリアライズも文字列の方が素直。
+      dateStrings: true,
     });
   }
   return global.__mysqlPool;
