@@ -67,10 +67,6 @@ export default async function StockDetailPage({
               {summary.first_date ?? "—"} 〜
             </span>
           </div>
-          <div className="metric">
-            <span className="label">日足本数</span>
-            <span className="value">{fmtNumber(summary.row_count)}</span>
-          </div>
         </div>
       </div>
 
