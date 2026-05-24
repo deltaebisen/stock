@@ -138,7 +138,8 @@ PAT は CLI 引数ではなく **`.env` の `RUNNER_PAT` から読む** (`setup-
 
 - `docker compose` (中途半端な python interpreter が壊れてる) → `docker run` ベースの `run.sh` 必須
 - `nohup` / `screen` → デタッチが必要なジョブは `docker run -d` + `--restart` で対応 (`prices-bg`, `stock-runner`)
-- **Docker image を NAS で pull できない** → Windows で `docker pull` → `docker save | gzip` → `scp` → NAS で `docker load`
+- **Docker image を NAS で pull できない** → Windows で `docker pull` → `docker save | gzip` → `scp` → NAS で `docker load` (scp 先は `~/`、`/mnt/public/develop/stock/` は CI 由来の uid で書き込み不可)。持ち込むイメージは現状 `myoung34/github-runner` (CI runner) と `node:22-bookworm-slim` (Next.js ランタイム) の 2 つ
+- **Next.js は alpine ではなく debian 系を使う** (`node:22-bookworm-slim`)。`node:22-alpine` (musl-arm64) では SWC の prebuilt native binary が SIGBUS で死んで `next build` が完走しない。glibc-arm64 の prebuilt は安定実績ありなので debian に倒している
 - システムに git/rsync/その他のツールがほぼ無い → 必要なら image 内で完結させる (runner image が git/rsync を内包しているのを利用)
 
 `network_mode: host` は LAN 内 MariaDB に繋ぐためで、SMB 経由のホスト I/O も同じネットワークスタックを通る。
