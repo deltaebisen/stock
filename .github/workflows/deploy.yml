@@ -12,8 +12,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Sync files to /mnt/public/develop/stock
+      - name: Sync files to NAS workspace
         run: |
+          # NAS_WORKSPACE は setup-runner.sh で渡している NAS ホスト絶対パス
+          # (例: /mnt/public/develop/stock)。同じパスで runner にも bind mount してある
+          # ので、ここでの rsync も、後続の docker -v マウントも同一パスで扱える。
           rsync -av --delete \
             --exclude='.git/' \
             --exclude='.github/' \
@@ -23,15 +26,15 @@ jobs:
             --exclude='frontend/.next/' \
             --exclude='frontend/out/' \
             --exclude='*.log' \
-            "${{ github.workspace }}/" /workspace/
+            "${{ github.workspace }}/" "$NAS_WORKSPACE/"
 
       - name: Ensure Next.js dev server is up
         run: |
-          # runner container の uid と /workspace の uid が一致せず
-          # ./run.sh の x bit が刺さらないことがあるので bash で直接 invoke
-          bash /workspace/run.sh web
+          # bash 経由で invoke (file の x bit に依存しないため)。
+          # run.sh 内の SCRIPT_DIR がホスト絶対パスとして解決される必要があるので
+          # NAS_WORKSPACE 配下のパスで叩く。
+          bash "$NAS_WORKSPACE/run.sh" web
 
       - name: Show deployed commit
         run: |
-          cd /workspace
-          echo "Deployed: ${{ github.sha }} (${{ github.event.head_commit.message }})"
+          echo "Deployed: ${{ github.sha }} (${{ github.event.head_commit.message }}) → $NAS_WORKSPACE"
