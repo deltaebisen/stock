@@ -49,9 +49,18 @@ docker run -d \
   -e RUNNER_WORKDIR="/tmp/runner-work" \
   -e LABELS="self-hosted,nas,arm64" \
   -e EPHEMERAL="false" \
+  -e NAS_WORKSPACE="${SCRIPT_DIR}" \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "${SCRIPT_DIR}:/workspace" \
+  -v "${SCRIPT_DIR}:${SCRIPT_DIR}" \
   myoung34/github-runner:latest
+
+# 注: -v "${SCRIPT_DIR}:${SCRIPT_DIR}" でホストと同じパスにマウントしている。
+# runner は docker.sock 経由で sibling container を spawn するが、その時の volume
+# パス指定はホスト Docker daemon に渡されるためホスト視点でのパスが必要。
+# `${SCRIPT_DIR}:/workspace` のように違う名前にすると run.sh が SCRIPT_DIR を
+# `/workspace` と認識して `docker run -v /workspace/frontend:/app` をホスト側に
+# 投げ、ホストに /workspace が無いので空マウントになり package.json が見えない。
+# NAS_WORKSPACE 環境変数を deploy.yml に渡してホスト絶対パスを参照させる。
 
 echo ""
 echo "Runner 起動済み。確認:"

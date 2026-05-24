@@ -105,9 +105,18 @@ DB 接続情報は `--env-file .env` でコンテナに注入され、`process.e
 
 ワークフロー (`.github/workflows/deploy.yml`):
 1. `actions/checkout` で runner 内部の workspace にコード取得
-2. `rsync` で `/workspace`  (= NAS の `/mnt/public/develop/stock/`) に展開
+2. `rsync` で `$NAS_WORKSPACE` (= NAS の `/mnt/public/develop/stock/`) に展開
 3. `.env`, `data/`, `frontend/node_modules/`, `frontend/.next/` 等は除外 (NAS 側の値を保持)
-4. `./run.sh web` を叩いて Next.js dev を ensure (既に動いていれば no-op)
+4. `bash $NAS_WORKSPACE/run.sh web` で Next.js dev を ensure (既に動いていれば no-op)
+
+**`$NAS_WORKSPACE` が何故必要か (DinD sibling container の罠)**:
+runner は `docker.sock` をマウントして sibling container を spawn する設計。runner 内で
+`run.sh` が走ると `docker run -v $SCRIPT_DIR/frontend:/app` を発行するが、この volume
+パスはホスト Docker daemon が解釈するためホスト視点のパスでないといけない。
+そこで `setup-runner.sh` は `-v "${SCRIPT_DIR}:${SCRIPT_DIR}"` (同パスマウント) と
+`-e NAS_WORKSPACE="${SCRIPT_DIR}"` を runner に渡し、deploy.yml は `$NAS_WORKSPACE`
+配下のパスで rsync / run.sh invoke している。これで runner 内とホストでパスが一致して
+sibling container の volume mount が成立する。
 
 **自動再起動の方針**:
 - Next.js dev は deploy 後に `./run.sh web` を ensure 呼びするが、既起動なら no-op で fast-refresh に任せる
