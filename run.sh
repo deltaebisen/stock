@@ -108,13 +108,21 @@ case "${1:-}" in
     ;;
 
   web)
-    # dev サーバー起動。NAS の MariaDB に 127.0.0.1:3306 で繋ぐため --network host
+    # dev サーバー常駐起動 (detached + restart unless-stopped)。
+    # NAS の MariaDB に 127.0.0.1:3306 で繋ぐため --network host。
+    # 既に起動中なら no-op (deploy 後の変更は fast-refresh が拾うので restart 不要)
     if [ ! -f "$SCRIPT_DIR/frontend/package.json" ]; then
       echo "Error: ./frontend/package.json not found. Run '$0 web-init' first."
       exit 1
     fi
-    docker run --rm -it \
+    if [ -n "$(docker ps -q -f name=^stock-web$)" ]; then
+      echo "stock-web は既に起動中。ログ追跡: docker logs -f stock-web"
+      exit 0
+    fi
+    docker rm -f stock-web 2>/dev/null || true
+    docker run -d \
       --name stock-web \
+      --restart unless-stopped \
       --network host \
       --env-file .env \
       -v "$SCRIPT_DIR/frontend:/app" \
@@ -123,10 +131,28 @@ case "${1:-}" in
       -w /app \
       node:22-alpine \
       sh -c "npm install && npm run dev -- -H 0.0.0.0"
+    echo ""
+    echo "起動済み (http://<nas-ip>:3000)。初回は npm install 待ちで 1〜2 分。"
+    echo "  ログ:    docker logs -f stock-web"
+    echo "  状態:    docker ps -a --filter name=stock-web"
+    echo "  再起動:  $0 web-restart"
+    echo "  停止:    $0 web-stop"
+    ;;
+
+  web-logs)
+    docker logs -f stock-web
+    ;;
+
+  web-restart)
+    docker restart stock-web
+    ;;
+
+  web-stop)
+    docker rm -f stock-web
     ;;
 
   *)
-    echo "Usage: $0 {build|listed|prices|prices-bg|prices-diff|prices-one|shell|web-init|web}"
+    echo "Usage: $0 {build|listed|prices|prices-bg|prices-diff|prices-one|shell|web-init|web|web-logs|web-restart|web-stop}"
     echo ""
     echo "  build              Build backend image (Python worker)"
     echo "  listed             Fetch listed companies master"
@@ -136,7 +162,10 @@ case "${1:-}" in
     echo "  prices-one DATE    Fetch daily prices for one date (YYYY-MM-DD)"
     echo "  shell              Open shell inside backend (debug)"
     echo "  web-init           Bootstrap Next.js scaffold into ./frontend (run once)"
-    echo "  web                Run Next.js dev server (http://<nas-ip>:3000)"
+    echo "  web                Start Next.js dev server (detached, idempotent)"
+    echo "  web-logs           Tail Next.js dev server logs"
+    echo "  web-restart        Restart Next.js dev server"
+    echo "  web-stop           Stop and remove Next.js dev server"
     exit 1
     ;;
 esac
