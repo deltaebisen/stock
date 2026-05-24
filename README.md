@@ -7,18 +7,25 @@ J-Quants API V2から日足データを取得してMariaDBに格納する。
 ```
 stock/
 ├── run.sh                  # docker runラッパースクリプト (推奨)
-├── docker-compose.yml      # Compose使う場合の定義 (環境による)
-├── Dockerfile              # Pythonイメージ
-├── requirements.txt        # 依存パッケージ
+├── setup-runner.sh         # GitHub Actions self-hosted runner 起動
 ├── .env.example            # 環境変数テンプレート
 ├── .env                    # 実際の認証情報 (gitignore)
-├── sql/
-│   └── init.sql            # DB・ユーザー・テーブル作成SQL
-└── src/
-    ├── jquants_client.py   # J-Quants V2 APIクライアント
-    ├── db.py               # DB接続ヘルパー
-    ├── fetch_listed.py     # 銘柄マスタ取得
-    └── fetch_prices.py     # 日足取得
+├── .github/workflows/
+│   └── deploy.yml          # push 時に NAS へ rsync するワークフロー
+├── backend/                # Python fetcher
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── requirements.txt
+│   ├── sql/init.sql        # DB・ユーザー・テーブル作成SQL
+│   └── src/
+│       ├── jquants_client.py
+│       ├── db.py
+│       ├── fetch_listed.py
+│       └── fetch_prices.py
+└── frontend/               # Next.js 16 App Router (web UI)
+    ├── app/
+    ├── package.json
+    └── ...
 ```
 
 ## セットアップ手順
@@ -29,10 +36,10 @@ https://jpx-jquants.com/ja/dashboard でAPIキーを発行。
 
 ### 2. 初期化SQL実行
 
-`sql/init.sql` 内のパスワードを実際の値に書き換えてから:
+`backend/sql/init.sql` 内のパスワードを実際の値に書き換えてから:
 
 ```bash
-mysql -u root -p < sql/init.sql
+mysql -u root -p < backend/sql/init.sql
 ```
 
 ### 3. .env作成
@@ -70,6 +77,7 @@ vi .env
 ## 実行 (docker compose版 - 環境が揃ってる場合)
 
 ```bash
+cd backend
 docker compose build
 docker compose run --rm worker python -m src.fetch_listed
 docker compose run --rm worker python -m src.fetch_prices
@@ -78,18 +86,16 @@ docker compose run --rm -e FETCH_MODE=diff worker python -m src.fetch_prices
 
 ## 長時間処理のバックグラウンド実行
 
-日足フル取得は1時間以上かかる。SSH切断で止まらないように `screen` か `nohup` で:
+日足フル取得は1時間以上かかる。SSH切断で止まらないように `./run.sh prices-bg` を使う:
 
 ```bash
-# screen
-screen -S fetch
-./run.sh prices
-# Ctrl+A → D でデタッチ、 screen -r fetch で復帰
-
-# nohup
-nohup ./run.sh prices > fetch.log 2>&1 &
-tail -f fetch.log
+./run.sh prices-bg                # detached で起動 (SSH切断後も継続)
+docker logs -f stock-prices       # ログ追跡
+docker ps -a --filter name=stock-prices    # 状態確認
+docker stop stock-prices          # 停止
 ```
+
+NAS の busybox 環境では `nohup` / `screen` が無いので、Docker デーモンに管理を任せるこの方式が確実。
 
 ## CI/CD (GitHub Actions self-hosted runner)
 
