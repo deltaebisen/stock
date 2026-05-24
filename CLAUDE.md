@@ -8,6 +8,13 @@ J-Quants API V2 から日本株データを取得して NAS 上の MariaDB に�
 ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群として動かす想定。
 公開はせずローカル運用、push 検知の self-hosted runner で deploy する CI/CD あり。
 
+ディレクトリ構成:
+- `backend/` — Python 製 fetcher (`Dockerfile`, `requirements.txt`, `sql/`, `src/`)
+- `frontend/` — Next.js 16 App Router (DB 閲覧用 UI)
+- `data/` — fetcher の出力先 (バックエンドだが root 配置 / 共有を想定して切り分け)
+- `.github/workflows/deploy.yml`, `setup-runner.sh` — CI/CD
+- `run.sh` — backend / frontend どちらも叩く統一ラッパー
+
 ## Common commands
 
 実行は `run.sh` (docker run ラッパー)。最初に `./run.sh build` で `stock-worker` イメージを作る必要がある。
@@ -24,13 +31,13 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ./run.sh web                # Next.js dev サーバー起動 (port 3000)
 ```
 
-`run.sh` は `src/` と `web/` をボリュームマウントするので、コード変更は再ビルド不要で即反映される。
+`run.sh` は `backend/src/` と `frontend/` をボリュームマウントするので、コード変更は再ビルド不要で即反映される。
 
 テストフレームワーク・リンタは未導入。
 
 ### 初回セットアップで必須
 
-- `sql/init.sql` 中の `CHANGE_ME_STRONG_PASSWORD` を実値に置換してから流す (3 箇所)
+- `backend/sql/init.sql` 中の `CHANGE_ME_STRONG_PASSWORD` を実値に置換してから流す (3 箇所)
 - `.env` は `.env.example` をコピーして `JQUANTS_API_KEY` と `DB_PASSWORD` を埋める
 - CI/CD を有効にする手順は `README.md` の「CI/CD」セクションに集約 (runner image を scp、token を発行、`setup-runner.sh` 実行)
 
@@ -47,10 +54,10 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ### V2 API のカラム命名と銘柄コード変換
 
 V2 はカラム名が短縮形 (`O`, `H`, `L`, `C`, `Vo`, `Va`, `AdjO`, `AdjFactor`, ...)。
-`fetch_prices.py` / `fetch_listed.py` の `COLUMN_MAP` で DB のスネークケースカラムにリネームしている。
+`backend/src/fetch_prices.py` / `backend/src/fetch_listed.py` の `COLUMN_MAP` で DB のスネークケースカラムにリネームしている。
 プラン差で出ないカラムを許容するため、`available = {k: v for k, v in COLUMN_MAP.items() if k in df.columns}` でフィルタしてからリネーム。
 
-**銘柄コードは「5桁の末尾0」だけを採用して 4 桁に切り詰める**。J-Quants V2 のコードは「4桁ベース + 種別1桁」構造で、優先株/種類株/ETF複数クラスなどが同じ 4 桁ベースで衝突するため、末尾 `0` (普通株) 以外は捨てる方針 (`fetch_listed.py:46`, `fetch_prices.py:91`)。新形式の `130A` などアルファベット混じりコードも `130A0` → `130A` のルールに乗る。
+**銘柄コードは「5桁の末尾0」だけを採用して 4 桁に切り詰める**。J-Quants V2 のコードは「4桁ベース + 種別1桁」構造で、優先株/種類株/ETF複数クラスなどが同じ 4 桁ベースで衝突するため、末尾 `0` (普通株) 以外は捨てる方針 (`backend/src/fetch_listed.py`, `backend/src/fetch_prices.py`)。新形式の `130A` などアルファベット混じりコードも `130A0` → `130A` のルールに乗る。
 
 調整済み株価は `adjustment_*` (split/併合反映済み)。バックテストはこちらを使う前提。
 
@@ -67,7 +74,7 @@ V2 はカラム名が短縮形 (`O`, `H`, `L`, `C`, `Vo`, `Va`, `AdjO`, `AdjFact
 
 `daily_quotes` の主キーは `(code, trade_date)`。`INSERT IGNORE` で重複弾く設計なので、途中で落ちても同じ範囲を再実行すれば続行できる。差分モード (`FETCH_MODE=diff`) は `SELECT MAX(trade_date)` を起点にする。
 
-pymysql は `NaN` を受け付けない (`nan can not be used with MySQL`)。一部銘柄 (出来高 0 やストップ高/安、上場直後の `adjustment_*` 未確定等) が NaN を持つので、`insert_quotes` で `pd.isna(v)` を見て `None` に倒している (`fetch_prices.py`)。
+pymysql は `NaN` を受け付けない (`nan can not be used with MySQL`)。一部銘柄 (出来高 0 やストップ高/安、上場直後の `adjustment_*` 未確定等) が NaN を持つので、`insert_quotes` で `pd.isna(v)` を見て `None` に倒している (`backend/src/fetch_prices.py`)。
 
 ### DB レイヤ
 
@@ -81,13 +88,13 @@ pymysql は `NaN` を受け付けない (`nan can not be used with MySQL`)。一
 
 ### Web (Next.js)
 
-`./run.sh web-init` で `web/` 配下に Next.js 16 App Router 製の雛形が生成される (TS, no Tailwind, no src dir, Turbopack, app router)。
+`./run.sh web-init` で `frontend/` 配下に Next.js 16 App Router 製の雛形が生成される (TS, no Tailwind, no src dir, Turbopack, app router)。
 `./run.sh web` は dev サーバーを `--network host` で起動 (`-H 0.0.0.0` で LAN 公開)。
 
 DB アクセスは Server Component から直接 `mysql2/promise` で行う想定 (API route は不要)。
 DB 接続情報は `--env-file .env` でコンテナに注入され、`process.env.DB_*` で参照する。
 
-`node_modules` と `.next` は名前付き volume (`stock-web-node-modules`, `stock-web-next-cache`) に逃がして、ホスト側 (SMB 共有経由) の I/O 詰まりを回避している。
+`node_modules` と `.next` は名前付き volume (`stock-web-node-modules`, `stock-web-next-cache`) に逃がして、ホスト側 (SMB 共有経由) の I/O 詰まりを回避している。`frontend/node_modules/` と `frontend/.next/` はホストには存在しない (= git にも CI rsync にも乗らない)。
 
 ## Deployment / CI/CD
 
@@ -96,7 +103,7 @@ DB 接続情報は `--env-file .env` でコンテナに注入され、`process.e
 ワークフロー (`.github/workflows/deploy.yml`):
 1. `actions/checkout` で runner 内部の workspace にコード取得
 2. `rsync` で `/workspace`  (= NAS の `/mnt/public/develop/stock/`) に展開
-3. `.env`, `data/`, `web/node_modules/`, `web/.next/` 等は除外 (NAS 側の値を保持)
+3. `.env`, `data/`, `frontend/node_modules/`, `frontend/.next/` 等は除外 (NAS 側の値を保持)
 
 **自動再起動はしない**:
 - Next.js dev は fast-refresh で勝手に拾うので restart 不要
