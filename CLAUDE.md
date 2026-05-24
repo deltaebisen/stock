@@ -41,7 +41,7 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ### 初回セットアップで必須
 
 - `backend/sql/init.sql` 中の `CHANGE_ME_STRONG_PASSWORD` を実値に置換してから流す (3 箇所)
-- `.env` は `.env.example` をコピーして `JQUANTS_API_KEY` と `DB_PASSWORD` を埋める
+- `.env` は `.env.example` をコピーして `JQUANTS_API_KEY` と `DB_PASSWORD` を埋める (NAS 側では追加で `RUNNER_PAT` も埋める — CI/CD 用)
 - CI/CD を有効にする手順は `README.md` の「CI/CD」セクションに集約 (runner image を scp、PAT を発行、`setup-runner.sh` 実行)
 
 ## Architecture
@@ -125,7 +125,9 @@ sibling container の volume mount が成立する。
 
 runner は `myoung34/github-runner:latest` (ARM64) を docker save/scp/load で持ち込み、`docker.sock` と `/mnt/public/develop/stock/` をマウントして常駐させている。`setup-runner.sh` がそのセットアップを担う。
 
-`ACCESS_TOKEN` (PAT) 方式で起動しており、起動時にイメージ自身が registration token を発行して登録する。短期失効する `RUNNER_TOKEN` (1h) は使っていないので、NAS 再起動・コンテナ再作成・GitHub 側 deregister のいずれの場合も `docker restart stock-runner` だけで自動復旧する。PAT 失効時のみ `setup-runner.sh` を新 PAT で再実行する。
+`ACCESS_TOKEN` (PAT) 方式で起動しており、起動時にイメージ自身が registration token を発行して登録する。短期失効する `RUNNER_TOKEN` (1h) は使っていないので、NAS 再起動・コンテナ再作成・GitHub 側 deregister のいずれの場合も `docker restart stock-runner` だけで自動復旧する。PAT 失効時のみ `setup-runner.sh` を再実行する。
+
+PAT は CLI 引数ではなく **`.env` の `RUNNER_PAT` から読む** (`setup-runner.sh` 内で `source .env`)。`.env` は gitignore 済 & CI rsync 除外で NAS local 保持なので、bash history や `docker inspect stock-runner` への漏出を避けられる。GitHub Actions secrets は runner 自身を起動する場面では使えない (runner が無いと workflow が走らないため chicken-and-egg)。
 
 ## NAS 環境の制約
 
