@@ -39,7 +39,7 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 
 - `backend/sql/init.sql` 中の `CHANGE_ME_STRONG_PASSWORD` を実値に置換してから流す (3 箇所)
 - `.env` は `.env.example` をコピーして `JQUANTS_API_KEY` と `DB_PASSWORD` を埋める
-- CI/CD を有効にする手順は `README.md` の「CI/CD」セクションに集約 (runner image を scp、token を発行、`setup-runner.sh` 実行)
+- CI/CD を有効にする手順は `README.md` の「CI/CD」セクションに集約 (runner image を scp、PAT を発行、`setup-runner.sh` 実行)
 
 ## Architecture
 
@@ -111,6 +111,8 @@ DB 接続情報は `--env-file .env` でコンテナに注入され、`process.e
 - `Dockerfile` / `requirements.txt` を変えた時は手動で `./run.sh build` し直す
 
 runner は `myoung34/github-runner:latest` (ARM64) を docker save/scp/load で持ち込み、`docker.sock` と `/mnt/public/develop/stock/` をマウントして常駐させている。`setup-runner.sh` がそのセットアップを担う。
+
+`ACCESS_TOKEN` (PAT) 方式で起動しており、起動時にイメージ自身が registration token を発行して登録する。短期失効する `RUNNER_TOKEN` (1h) は使っていないので、NAS 再起動・コンテナ再作成・GitHub 側 deregister のいずれの場合も `docker restart stock-runner` だけで自動復旧する。PAT 失効時のみ `setup-runner.sh` を新 PAT で再実行する。
 
 ## NAS 環境の制約
 
