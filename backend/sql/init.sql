@@ -101,3 +101,80 @@ CREATE TABLE IF NOT EXISTS fetch_log (
   INDEX idx_job_type (job_type),
   INDEX idx_started_at (started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- バックテスト実行
+-- 1 run = (strategy × parameters × universe × period × initial_capital × commission) 1 組合せ
+-- 結果メトリクス + status を 1 行にサマリ。詳細 (trades / equity curve) は別テーブル。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS backtest_runs (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NULL,                          -- 人間可読タグ。空でも可
+  strategy VARCHAR(50) NOT NULL,                   -- 'sma_cross' / 'rsi_mean_reversion' / 'macd_cross' ...
+  params JSON NOT NULL,                            -- 戦略固有パラメータ (e.g., {"fast":25,"slow":75})
+  universe_spec VARCHAR(255) NOT NULL,             -- 'all' / 'scale:TOPIX Large 70' / 'codes:7203,9984,...' 等の宣言
+  universe_codes JSON NOT NULL,                    -- 実際に解決された銘柄リスト
+  from_date DATE NOT NULL,
+  to_date DATE NOT NULL,
+  initial_capital DECIMAL(20,0) NOT NULL DEFAULT 1000000,
+  commission_bps INT NOT NULL DEFAULT 10,          -- 片道 (10 = 0.10%)。スリッページ込みの近似
+
+  -- 結果メトリクス (success のときのみ埋まる)
+  final_equity DECIMAL(20,2) NULL,
+  total_return DECIMAL(12,6) NULL,                 -- 累積リターン (= final/initial - 1)
+  cagr DECIMAL(12,6) NULL,
+  max_drawdown DECIMAL(12,6) NULL,                 -- max(1 - equity / running_max)
+  sharpe DECIMAL(12,6) NULL,                       -- 年率化 (daily * sqrt(252))
+  win_rate DECIMAL(12,6) NULL,                     -- winning_trades / closed_trades
+  num_trades INT NULL,
+  num_bars INT NULL,                               -- 評価日数
+
+  status VARCHAR(20) NOT NULL DEFAULT 'running',   -- running / success / error
+  error_message TEXT NULL,
+  started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  finished_at TIMESTAMP NULL,
+
+  INDEX idx_strategy (strategy),
+  INDEX idx_started (started_at),
+  INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- 個別取引 (1 run につき複数行)
+-- entry → exit の組を 1 行で持つ。期末持ち越しは exit_* が NULL
+-- ============================================================
+CREATE TABLE IF NOT EXISTS backtest_trades (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  run_id BIGINT NOT NULL,
+  code VARCHAR(10) NOT NULL,
+  side ENUM('long','short') NOT NULL DEFAULT 'long',
+  entry_date DATE NOT NULL,
+  entry_price DECIMAL(12,4) NOT NULL,
+  exit_date DATE NULL,
+  exit_price DECIMAL(12,4) NULL,
+  shares INT NOT NULL,
+  commission DECIMAL(20,4) NOT NULL DEFAULT 0,     -- 往復合計
+  pnl DECIMAL(20,2) NULL,                          -- 手数料込みの実損益
+  pnl_pct DECIMAL(12,6) NULL,                      -- pnl / (entry_price * shares)
+  exit_reason VARCHAR(30) NULL,                    -- 'signal' / 'end_of_test' (将来 stop_loss / take_profit)
+
+  FOREIGN KEY (run_id) REFERENCES backtest_runs(id) ON DELETE CASCADE,
+  INDEX idx_run (run_id),
+  INDEX idx_run_code (run_id, code),
+  INDEX idx_entry (entry_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- 日次 equity curve (1 run × 評価日数 行)
+-- 大量行になり得るので run_id+date を PK、drawdown はその日時点の running max ベース
+-- ============================================================
+CREATE TABLE IF NOT EXISTS backtest_equity (
+  run_id BIGINT NOT NULL,
+  trade_date DATE NOT NULL,
+  equity DECIMAL(20,2) NOT NULL,
+  cash DECIMAL(20,2) NOT NULL,
+  position_count INT NOT NULL DEFAULT 0,
+  drawdown DECIMAL(12,6) NOT NULL DEFAULT 0,       -- 当日時点の DD (0 = 高値更新中)
+  PRIMARY KEY (run_id, trade_date),
+  FOREIGN KEY (run_id) REFERENCES backtest_runs(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

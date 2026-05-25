@@ -28,6 +28,8 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ./run.sh prices-bg          # 日足フル取得 (デタッチ / SSH切断耐性)
 ./run.sh prices-diff        # 日足差分取得 (DB の最新日付以降のみ)
 ./run.sh prices-one DATE    # 1 日だけ取得 (テスト用 / YYYY-MM-DD)
+./run.sh backtest --strategy ... --universe ... --from DATE --to DATE
+                            # バックテスト実行 → backtest_runs/_trades/_equity に永続化
 ./run.sh shell              # Python worker に bash で入る
 ./run.sh web-init           # Next.js 雛形を ./frontend に生成 (初回のみ)
 ./run.sh web                # Next.js を build + start で常駐起動 (idempotent / port 3000)
@@ -92,6 +94,43 @@ pymysql は `NaN` を受け付けない (`nan can not be used with MySQL`)。一
 ### fetch_log の使い方
 
 `fetch_log` テーブルはジョブの履歴管理。`job_type` で種別 (`listed_info` / `daily_quotes` (個別日付エラー) / `daily_quotes_bulk` (バルク完了サマリ)) を区別する。差分ジョブのトラブルシューティングはまずここを見る。
+
+### バックテスト
+
+`./run.sh backtest --strategy STRATEGY --universe SPEC --from DATE --to DATE [--params K=V,...]` で実行。`daily_quotes` の `adjustment_*` (split/併合調整済価格) をもとに event-driven シミュレーションを回し、結果を 3 テーブルに永続化する。
+
+- `backtest_runs` — 1 run のメタ + サマリメトリクス (total_return / CAGR / Sharpe / max_drawdown / win_rate / num_trades)。`status` で running/success/error 管理
+- `backtest_trades` — 個別取引 (entry/exit/手数料込み pnl)。`run_id` でひも付け
+- `backtest_equity` — 日次 equity curve (cash + position market value)、drawdown 列付き
+
+実装は `backend/src/backtest.py` (engine + metrics + storage + CLI) + `backend/src/backtest_strategies.py` (Strategy 基底 + 組込み戦略)。
+
+**v1 のシンプル化前提**:
+- long-only、空売り無し
+- 既存ポジションへの追加買い無し (同銘柄 buy signal 連発は無視)
+- 当日 close で約定 (本来は翌日 open がより正確だが簡略化)
+- 等額配分: 同日に複数 entry signal が出たら残現金を新規組数で等分
+- 売買単位 100 株等の制約は無視 (1 株単位)
+- 手数料は `commission_bps` 片道で近似 (default 10bps = 0.1%)、スリッページもこれに吸収
+- universe を `all` (~4000 銘柄) にすると一括クエリで数 GB DataFrame になるので scale_category や explicit codes での絞り込み推奨
+
+**戦略追加方法**: `backtest_strategies.py` に `Strategy` サブクラスを書いて `STRATEGIES` と `DEFAULT_PARAMS` 辞書に登録。`generate_signals(df) -> Series` が +1/-1/0 を返す。
+
+**universe_spec**:
+- `all` — listed_info 全銘柄
+- `scale:TOPIX Large 70` — scale_category 完全一致
+- `codes:7203,9984,1301` — explicit list
+- `single:1301` — 1 銘柄ショートカット
+
+**結果の見方** (DB 直叩き例):
+```sql
+SELECT id, strategy, total_return, cagr, sharpe, max_drawdown, num_trades
+  FROM backtest_runs ORDER BY id DESC LIMIT 10;
+SELECT * FROM backtest_trades WHERE run_id = N ORDER BY entry_date;
+SELECT trade_date, equity, drawdown FROM backtest_equity WHERE run_id = N ORDER BY trade_date;
+```
+
+frontend での equity curve 表示 / 戦略パラメータ scan / walk-forward 等は別 PR で。
 
 ### Web (Next.js)
 

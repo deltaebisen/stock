@@ -104,6 +104,23 @@ case "${1:-}" in
       "$IMAGE_NAME" python -m src.fetch_prices
     ;;
 
+  backtest)
+    # バックテスト実行。"backtest" 以降の全引数を python -m src.backtest に passthrough。
+    # 例:
+    #   ./run.sh backtest --strategy sma_cross --params fast=25,slow=75 \
+    #     --universe single:1301 --from 2021-01-01 --to 2025-12-31
+    #   ./run.sh backtest --strategy macd_cross --universe 'scale:TOPIX Large 70' \
+    #     --from 2020-01-01 --to 2025-12-31 --name "macd large 5y"
+    shift  # "backtest" を捨てて残りを passthrough
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "$IMAGE_NAME" python -m src.backtest "$@"
+    ;;
+
   shell)
     docker run --rm -it \
       --network host \
@@ -196,7 +213,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: $0 {build|listed|calendar|calendar-diff|prices|prices-bg|prices-diff|prices-one|shell|web-init|web|web-rebuild|web-logs|web-stop}"
+    echo "Usage: $0 {build|listed|calendar|calendar-diff|prices|prices-bg|prices-diff|prices-one|backtest|shell|web-init|web|web-rebuild|web-logs|web-stop}"
     echo ""
     echo "  build              Build backend image (Python worker)"
     echo "  listed             Fetch listed companies master"
@@ -206,6 +223,8 @@ case "${1:-}" in
     echo "  prices-bg          Fetch daily prices (full, detached / SSH切断耐性)"
     echo "  prices-diff        Fetch daily prices (only new dates)"
     echo "  prices-one DATE    Fetch daily prices for one date (YYYY-MM-DD)"
+    echo "  backtest --strategy SMA_CROSS|RSI_MEAN_REVERSION|MACD_CROSS --universe ... --from ... --to ..."
+    echo "                     Run a backtest and persist results to backtest_runs/_trades/_equity"
     echo "  shell              Open shell inside backend (debug)"
     echo "  web-init           Bootstrap Next.js scaffold into ./frontend (run once)"
     echo "  web                Build + start Next.js (production, detached, idempotent)"
