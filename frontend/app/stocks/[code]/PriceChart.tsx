@@ -10,12 +10,23 @@ import {
   createChart,
   type IChartApi,
   type ISeriesApi,
+  type SeriesType,
   type CandlestickData,
   type HistogramData,
   type LineData,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { sma, macd } from "@/lib/indicators";
+import {
+  type IndicatorInstance,
+  type IndicatorValues,
+  INDICATOR_PANE,
+  computeIndicator,
+  isValidIndicator,
+} from "@/lib/indicators";
+import IndicatorMenu from "./IndicatorMenu";
+
+// localStorage key (スキーマ変更時は v2 にバンプ)
+const INDICATORS_STORAGE_KEY = "stock-chart-indicators-v1";
 
 type ApiQuote = {
   trade_date: string;
@@ -42,16 +53,24 @@ const RANGES: { key: Range; label: string; days: number | null }[] = [
   { key: "ALL", label: "ALL", days: null },
 ];
 
-const SMA_PERIODS = [25, 50, 75] as const;
-const SMA_COLORS: Record<(typeof SMA_PERIODS)[number], string> = {
-  25: "#f7b955",
-  50: "#79c0ff",
-  75: "#d2a8ff",
-};
+const RSI_OVERBOUGHT = 70;
+const RSI_OVERSOLD = 30;
 
-const MACD_FAST = 12;
-const MACD_SLOW = 26;
-const MACD_SIGNAL = 9;
+// 初期セット (TradingView 風だが、過去互換で既存ユーザーが慣れた SMA 25/50/75 + MACD を default に)
+const DEFAULT_INDICATORS: IndicatorInstance[] = [
+  { id: "default-sma-25", type: "SMA", period: 25, color: "#f7b955" },
+  { id: "default-sma-50", type: "SMA", period: 50, color: "#79c0ff" },
+  { id: "default-sma-75", type: "SMA", period: 75, color: "#d2a8ff" },
+  {
+    id: "default-macd",
+    type: "MACD",
+    fast: 12,
+    slow: 26,
+    signal: 9,
+    lineColor: "#58a6ff",
+    signalColor: "#f7b955",
+  },
+];
 
 function toUnix(dateStr: string): UTCTimestamp {
   return Math.floor(new Date(dateStr + "T00:00:00Z").getTime() / 1000) as UTCTimestamp;
@@ -61,21 +80,58 @@ type ChartHandles = {
   chart: IChartApi;
   candle: ISeriesApi<"Candlestick">;
   volume: ISeriesApi<"Histogram">;
-  smaSeries: Map<(typeof SMA_PERIODS)[number], ISeriesApi<"Line">>;
-  macdLine: ISeriesApi<"Line">;
-  macdSignal: ISeriesApi<"Line">;
-  macdHist: ISeriesApi<"Histogram">;
+};
+
+type IndicatorEntry = {
+  series: ISeriesApi<SeriesType>[];
+  /** separate pane を使ってる場合の pane index (overlay なら undefined) */
+  paneIndex?: number;
 };
 
 export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const handlesRef = useRef<ChartHandles | null>(null);
+  // indicator id → 生成済み series エントリ (動的 add/remove)
+  const dynRef = useRef<Map<string, IndicatorEntry>>(new Map());
 
   const [range, setRange] = useState<Range>("1Y");
-  const [showMA, setShowMA] = useState(true);
-  const [showMACD, setShowMACD] = useState(true);
+  const [indicators, setIndicators] = useState<IndicatorInstance[]>(DEFAULT_INDICATORS);
+  // 各 indicator の直近値 (chip 表示用)
+  const [latestMap, setLatestMap] = useState<Map<string, (number | null)[]>>(new Map());
+  // localStorage 復元が完了するまで保存しない (= SSR の DEFAULT で保存上書きを防ぐ)
+  const restoredRef = useRef(false);
 
-  // chart 構築 (mount 時のみ)
+  // localStorage から復元 (CSR マウント時のみ)。SSR では DEFAULT のまま hydration、
+  // マウント後に setIndicators で上書きする方式 (hydration mismatch 警告は出ない)。
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(INDICATORS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const valid = parsed.filter(isValidIndicator);
+          // 完全に空でも (= ユーザーが全削除した状態) 復元する
+          setIndicators(valid);
+        }
+      }
+    } catch {
+      // 壊れてたら DEFAULT のままで続行
+    } finally {
+      restoredRef.current = true;
+    }
+  }, []);
+
+  // indicators 変更で localStorage に保存 (復元完了後のみ)
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    try {
+      localStorage.setItem(INDICATORS_STORAGE_KEY, JSON.stringify(indicators));
+    } catch {
+      // QuotaExceeded など。指標構成は数 KB なので通常起きない
+    }
+  }, [indicators]);
+
+  // --- 1. chart mount (一度きり) ---
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -101,7 +157,6 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
       autoSize: true,
     });
 
-    // Pane 0: candle + SMA lines (+ volume overlay)
     const candle = chart.addSeries(CandlestickSeries, {
       upColor: "#3fb950",
       downColor: "#f85149",
@@ -122,81 +177,26 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
       scaleMargins: { top: 0.05, bottom: 0.25 },
     });
 
-    const smaSeries = new Map<(typeof SMA_PERIODS)[number], ISeriesApi<"Line">>();
-    for (const p of SMA_PERIODS) {
-      const s = chart.addSeries(LineSeries, {
-        color: SMA_COLORS[p],
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        title: `SMA${p}`,
-      });
-      smaSeries.set(p, s);
-    }
-
-    // Pane 1: MACD
-    const macdHist = chart.addSeries(
-      HistogramSeries,
-      {
-        priceFormat: { type: "price", precision: 2, minMove: 0.01 },
-        priceLineVisible: false,
-        lastValueVisible: false,
-      },
-      1,
-    );
-    const macdLine = chart.addSeries(
-      LineSeries,
-      {
-        color: "#58a6ff",
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-      },
-      1,
-    );
-    const macdSignal = chart.addSeries(
-      LineSeries,
-      {
-        color: "#f7b955",
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-      },
-      1,
-    );
-
-    handlesRef.current = {
-      chart,
-      candle,
-      volume,
-      smaSeries,
-      macdLine,
-      macdSignal,
-      macdHist,
-    };
-
-    const ro = new ResizeObserver(() => chart.timeScale().fitContent());
-    ro.observe(el);
+    handlesRef.current = { chart, candle, volume };
 
     return () => {
-      ro.disconnect();
       chart.remove();
       handlesRef.current = null;
+      dynRef.current.clear();
     };
   }, []);
 
-  // データ反映 (quotes / range / トグル変更時)
-  // 指標は **全期間** で計算 → 表示期間でスライスして series に渡す。
-  // (filtered な配列だけで SMA(75) や MACD を計算すると、短期間レンジで先頭が
-  //  warmup 不足になり値がガラリと変わってしまうため)
+  // --- 2. quotes / indicators / range 変更で描画更新 ---
+  // 設計: indicators 変更時は dynamic series を全 rebuild。インクリメンタル diff より
+  // 確実で、5〜10 個程度の指標なら teardown→recreate は 1ms 未満で済む。
   useEffect(() => {
     const h = handlesRef.current;
     if (!h) return;
 
-    // 全期間の base 配列を組む (常に split / 併合調整後の価格を使う)
+    // データ変換 (常に全期間)
     const allTimes: UTCTimestamp[] = [];
     const allCandles: CandlestickData[] = [];
-    const allVolumes: (HistogramData | null)[] = [];
+    const allVolumes: HistogramData[] = [];
     const allCloses: (number | null)[] = [];
 
     for (const q of quotes) {
@@ -210,94 +210,79 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
       allTimes.push(time);
       allCandles.push({ time, open: o, high, low: l, close: c });
       allCloses.push(c);
-      allVolumes.push(
-        v === null
-          ? null
-          : {
-              time,
-              value: v,
-              color: c >= o ? "rgba(63, 185, 80, 0.45)" : "rgba(248, 81, 73, 0.45)",
-            },
+      if (v !== null) {
+        allVolumes.push({
+          time,
+          value: v,
+          color: c >= o ? "rgba(63, 185, 80, 0.45)" : "rgba(248, 81, 73, 0.45)",
+        });
+      }
+    }
+
+    h.candle.setData(allCandles);
+    h.volume.setData(allVolumes);
+
+    // ---- 動的 indicator 系列の全 rebuild ----
+    // 1) 既存 entry を teardown
+    for (const entry of dynRef.current.values()) {
+      for (const s of entry.series) {
+        try {
+          h.chart.removeSeries(s);
+        } catch {
+          // すでに削除済みは無視
+        }
+      }
+    }
+    dynRef.current.clear();
+    // 余分な pane を削除して pane 0 だけ残す
+    while (h.chart.panes().length > 1) {
+      try {
+        h.chart.removePane(h.chart.panes().length - 1);
+      } catch {
+        break;
+      }
+    }
+
+    // 2) indicators を順に再生成
+    let nextSepPaneIdx = 1;
+    const newLatest = new Map<string, (number | null)[]>();
+    for (const ind of indicators) {
+      const isSep = INDICATOR_PANE[ind.type] === "separate";
+      const paneIdx = isSep ? nextSepPaneIdx++ : 0;
+      const series = createSeriesForIndicator(h.chart, ind, paneIdx);
+      const computed = computeIndicator(ind, allCloses);
+      applyComputedToSeries(series, ind, computed, allTimes);
+      dynRef.current.set(ind.id, {
+        series,
+        paneIndex: isSep ? paneIdx : undefined,
+      });
+      newLatest.set(ind.id, computed.latest);
+    }
+    setLatestMap(newLatest);
+
+    // ---- 表示範囲を range に合わせて制限 ----
+    // setVisibleLogicalRange (バー index ベース) で全データ保持しつつ初期窓を絞る。
+    // drag/wheel で過去側を広げると保持済みデータがそのまま描画される。
+    const rangeDef = RANGES.find((r) => r.key === range);
+    const totalBars = allTimes.length;
+    if (rangeDef && rangeDef.days !== null && totalBars > 0) {
+      const cutoffSec = Math.floor(
+        (Date.now() - rangeDef.days * 86400 * 1000) / 1000,
       );
-    }
-
-    // 指標を **全期間** で計算
-    const smaValues: Record<(typeof SMA_PERIODS)[number], (number | null)[]> = {
-      25: sma(allCloses, 25),
-      50: sma(allCloses, 50),
-      75: sma(allCloses, 75),
-    };
-    const macdValues = macd(allCloses, MACD_FAST, MACD_SLOW, MACD_SIGNAL);
-
-    // 表示期間でスライスする開始 index を決める
-    const cutoffMs = (() => {
-      const r = RANGES.find((r) => r.key === range);
-      if (!r || r.days === null) return null;
-      return Date.now() - r.days * 86400 * 1000;
-    })();
-    const cutoffSec = cutoffMs === null ? null : Math.floor(cutoffMs / 1000);
-    const startIdx =
-      cutoffSec === null
-        ? 0
-        : allTimes.findIndex((t) => (t as number) >= cutoffSec);
-    const sliceFrom = startIdx < 0 ? allTimes.length : startIdx;
-
-    // candle / volume を slice して set
-    h.candle.setData(allCandles.slice(sliceFrom));
-    h.volume.setData(allVolumes.slice(sliceFrom).filter((x): x is HistogramData => x !== null));
-
-    // SMA
-    if (showMA) {
-      for (const p of SMA_PERIODS) {
-        const series = h.smaSeries.get(p)!;
-        const values = smaValues[p];
-        const data: LineData[] = [];
-        for (let i = sliceFrom; i < values.length; i++) {
-          const val = values[i];
-          if (val !== null) data.push({ time: allTimes[i], value: val });
-        }
-        series.setData(data);
-        series.applyOptions({ visible: true });
+      let visibleBars = 0;
+      for (let i = totalBars - 1; i >= 0; i--) {
+        if ((allTimes[i] as number) < cutoffSec) break;
+        visibleBars++;
       }
+      visibleBars = Math.max(visibleBars, 1);
+      h.chart.timeScale().setVisibleLogicalRange({
+        from: totalBars - visibleBars,
+        to: totalBars - 1,
+      });
     } else {
-      for (const p of SMA_PERIODS) {
-        h.smaSeries.get(p)!.applyOptions({ visible: false });
-      }
+      h.chart.timeScale().fitContent();
     }
-
-    // MACD
-    if (showMACD) {
-      const macdData: LineData[] = [];
-      const signalData: LineData[] = [];
-      const histData: HistogramData[] = [];
-      for (let i = sliceFrom; i < allTimes.length; i++) {
-        const m = macdValues.macd[i];
-        const s = macdValues.signal[i];
-        const hist = macdValues.histogram[i];
-        if (m !== null) macdData.push({ time: allTimes[i], value: m });
-        if (s !== null) signalData.push({ time: allTimes[i], value: s });
-        if (hist !== null) {
-          histData.push({
-            time: allTimes[i],
-            value: hist,
-            color: hist >= 0 ? "rgba(63, 185, 80, 0.6)" : "rgba(248, 81, 73, 0.6)",
-          });
-        }
-      }
-      h.macdLine.setData(macdData);
-      h.macdSignal.setData(signalData);
-      h.macdHist.setData(histData);
-      h.macdLine.applyOptions({ visible: true });
-      h.macdSignal.applyOptions({ visible: true });
-      h.macdHist.applyOptions({ visible: true });
-    } else {
-      h.macdLine.applyOptions({ visible: false });
-      h.macdSignal.applyOptions({ visible: false });
-      h.macdHist.applyOptions({ visible: false });
-    }
-
-    h.chart.timeScale().fitContent();
-  }, [quotes, range, showMA, showMACD]);
+  }, [quotes, indicators, range]);
 
   return (
     <div className="card chart-card">
@@ -314,26 +299,201 @@ export default function PriceChart({ quotes }: { quotes: ApiQuote[] }) {
             </button>
           ))}
         </div>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={showMA}
-            onChange={(e) => setShowMA(e.target.checked)}
-            style={{ width: 14, height: 14 }}
-          />
-          SMA (25/50/75)
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={showMACD}
-            onChange={(e) => setShowMACD(e.target.checked)}
-            style={{ width: 14, height: 14 }}
-          />
-          MACD (12/26/9)
-        </label>
+        <IndicatorMenu
+          indicators={indicators}
+          setIndicators={setIndicators}
+          latestValues={latestMap}
+        />
       </div>
       <div ref={containerRef} className="chart-body" />
     </div>
   );
+}
+
+// =================================================================
+// helpers
+// =================================================================
+
+function createSeriesForIndicator(
+  chart: IChartApi,
+  ind: IndicatorInstance,
+  paneIdx: number,
+): ISeriesApi<SeriesType>[] {
+  switch (ind.type) {
+    case "SMA":
+    case "EMA": {
+      const s = chart.addSeries(
+        LineSeries,
+        {
+          color: ind.color,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        },
+        paneIdx,
+      );
+      return [s];
+    }
+    case "BB": {
+      const upper = chart.addSeries(
+        LineSeries,
+        {
+          color: ind.color,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        },
+        paneIdx,
+      );
+      const middle = chart.addSeries(
+        LineSeries,
+        {
+          color: ind.color,
+          lineWidth: 1,
+          lineStyle: 2,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        },
+        paneIdx,
+      );
+      const lower = chart.addSeries(
+        LineSeries,
+        {
+          color: ind.color,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        },
+        paneIdx,
+      );
+      return [upper, middle, lower];
+    }
+    case "MACD": {
+      const line = chart.addSeries(
+        LineSeries,
+        {
+          color: ind.lineColor,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        },
+        paneIdx,
+      );
+      const signal = chart.addSeries(
+        LineSeries,
+        {
+          color: ind.signalColor,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        },
+        paneIdx,
+      );
+      const histo = chart.addSeries(
+        HistogramSeries,
+        {
+          priceFormat: { type: "price", precision: 2, minMove: 0.01 },
+          priceLineVisible: false,
+          lastValueVisible: false,
+        },
+        paneIdx,
+      );
+      return [line, signal, histo];
+    }
+    case "RSI": {
+      const s = chart.addSeries(
+        LineSeries,
+        {
+          color: ind.color,
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        },
+        paneIdx,
+      );
+      // 70/30 reference lines (axis label は出さない)
+      s.createPriceLine({
+        price: RSI_OVERBOUGHT,
+        color: "rgba(248, 81, 73, 0.5)",
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: false,
+        title: "",
+      });
+      s.createPriceLine({
+        price: RSI_OVERSOLD,
+        color: "rgba(63, 185, 80, 0.5)",
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: false,
+        title: "",
+      });
+      return [s];
+    }
+  }
+}
+
+function applyComputedToSeries(
+  series: ISeriesApi<SeriesType>[],
+  ind: IndicatorInstance,
+  computed: IndicatorValues,
+  allTimes: UTCTimestamp[],
+): void {
+  switch (ind.type) {
+    case "SMA":
+    case "EMA":
+    case "RSI": {
+      (series[0] as ISeriesApi<"Line">).setData(
+        toLineData(computed.series[0], allTimes),
+      );
+      return;
+    }
+    case "BB": {
+      (series[0] as ISeriesApi<"Line">).setData(
+        toLineData(computed.series[0], allTimes),
+      );
+      (series[1] as ISeriesApi<"Line">).setData(
+        toLineData(computed.series[1], allTimes),
+      );
+      (series[2] as ISeriesApi<"Line">).setData(
+        toLineData(computed.series[2], allTimes),
+      );
+      return;
+    }
+    case "MACD": {
+      (series[0] as ISeriesApi<"Line">).setData(
+        toLineData(computed.series[0], allTimes),
+      );
+      (series[1] as ISeriesApi<"Line">).setData(
+        toLineData(computed.series[1], allTimes),
+      );
+      const hist = computed.series[2];
+      const histData: HistogramData[] = [];
+      for (let i = 0; i < hist.length; i++) {
+        const v = hist[i];
+        if (v !== null) {
+          histData.push({
+            time: allTimes[i],
+            value: v,
+            color:
+              v >= 0 ? "rgba(63, 185, 80, 0.6)" : "rgba(248, 81, 73, 0.6)",
+          });
+        }
+      }
+      (series[2] as ISeriesApi<"Histogram">).setData(histData);
+      return;
+    }
+  }
+}
+
+function toLineData(
+  values: ReadonlyArray<number | null>,
+  times: UTCTimestamp[],
+): LineData[] {
+  const out: LineData[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v !== null) out.push({ time: times[i], value: v });
+  }
+  return out;
 }
