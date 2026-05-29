@@ -22,6 +22,8 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ```bash
 ./run.sh build              # Python worker イメージビルド
 ./run.sh listed             # 銘柄マスタ取得
+./run.sh calendar           # 営業日カレンダー取得 (full)
+./run.sh calendar-diff      # 営業日カレンダー差分取得 (月次運用想定)
 ./run.sh prices             # 日足フル取得 (前景)
 ./run.sh prices-bg          # 日足フル取得 (デタッチ / SSH切断耐性)
 ./run.sh prices-diff        # 日足差分取得 (DB の最新日付以降のみ)
@@ -52,7 +54,9 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 `fetch_prices.py` はこの性質を利用して**日付でループ**する (銘柄ループではない)。
 5 年で約 1250 営業日、レートリミットを守りやすい。
 
-土日は `weekday() >= 5` でスキップ。祝日はレスポンスが空なので自然にスキップされる。
+営業日判定は **`trading_calendar` テーブルを SELECT** して `is_trading=1` の日付 set を作り、それ以外は skip。テーブルが空の場合 (初回 / `./run.sh calendar` 未実行) は `weekday() >= 5` フォールバック + 祝日はレスポンス空で自然スキップ。
+
+`trading_calendar` は `/v2/markets/trading_calendar` から取得 (`HolidayDivision`: '0'=非営業日 / '1'=営業日 / '2'=東証半日立会 / '3'=祝日取引可能日)。半日立会も日足は出るので `'1' or '2'` を `is_trading=1` として保存。`./run.sh calendar` で過去 5 年 + 翌年末まで取得、運用中は `./run.sh calendar-diff` で月次更新する想定 (祝日は前年に公開されるため翌年分まで先取り)。
 
 ### V2 API のカラム命名と銘柄コード変換
 

@@ -89,3 +89,24 @@ class JQuantsClient:
         if date:
             params["date"] = date
         return self._get_paginated("/equities/bars/daily", params=params)
+
+    def get_trading_calendar(self, from_date=None, to_date=None, holiday_division=None):
+        """営業日カレンダー (V2: /markets/trading_calendar)
+
+        レスポンスのデータキーは 'trading_calendar'。
+        HolidayDivision:
+          '0' = 非営業日
+          '1' = 営業日
+          '2' = 東証半日立会
+          '3' = 祝日取引可能日 (legacy)
+        """
+        params = {}
+        if from_date:
+            params["from"] = from_date
+        if to_date:
+            params["to"] = to_date
+        if holiday_division is not None:
+            params["holidaydivision"] = holiday_division
+        return self._get_paginated(
+            "/markets/trading_calendar", params=params, data_key="trading_calendar"
+        )
