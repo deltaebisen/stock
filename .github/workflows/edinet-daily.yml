@@ -1,0 +1,24 @@
+name: Daily EDINET batch (docs-diff + xbrl)
+
+# 毎日 20:00 JST = 11:00 UTC に NAS 上で順番に実行する。
+# 当日中に提出された有報・四半期報告 etc. のメタを取り込み、未 parse の XBRL を
+# financial_facts に展開する。edinet-codes (事業者コード) は週次想定なので別運用。
+on:
+  schedule:
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+
+jobs:
+  edinet:
+    runs-on: self-hosted
+    steps:
+      - name: Fetch EDINET document metadata (diff)
+        # edinet_documents の MAX(submit_datetime) 以降を今日まで取得。
+        # 1 日分なら数秒〜1 分。
+        run: bash "$NAS_WORKSPACE/run.sh" edinet-docs-diff
+
+      - name: Parse XBRL into financial_facts
+        # parsed_at IS NULL のレコードを arelle で parse。新規取り込み分 (~1日分) は
+        # 数分で完了する想定。初回フルや積み残しが大量にあるときは時間がかかるので
+        # 必要に応じて手動で `./run.sh xbrl-bg` に切り替える。
+        run: bash "$NAS_WORKSPACE/run.sh" xbrl

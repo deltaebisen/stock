@@ -1,0 +1,17 @@
+name: Weekly EDINET batch (codes)
+
+# 毎週日曜 05:00 JST = 土曜 20:00 UTC に NAS 上で実行。
+# EDINET 事業者コード (証券コード ↔ EDINET コード) は更新頻度が低いので週次で十分。
+# 早朝に走らせて、daily の edinet-docs-diff (20:00 JST) より十分前に最新マッピングを揃える。
+on:
+  schedule:
+    - cron: '0 20 * * 6'
+  workflow_dispatch:
+
+jobs:
+  edinet-codes:
+    runs-on: self-hosted
+    steps:
+      - name: Fetch EDINET 事業者コード一覧
+        # ソース zip を DL → 数万行を全量 TRUNCATE + INSERT。数秒で完了。
+        run: bash "$NAS_WORKSPACE/run.sh" edinet-codes

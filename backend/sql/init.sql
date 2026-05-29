@@ -85,6 +85,96 @@ CREATE TABLE IF NOT EXISTS trading_calendar (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================
+-- EDINET コードマッピング (証券コード <-> EDINET コード)
+-- ソース: https://disclosure2dl.edinet-fsa.go.jp/searchdocument/codelist/Edinetcode.zip
+-- 週次で全量上書き想定 (件数は数万件で軽量)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS edinet_code_mapping (
+  edinet_code CHAR(6) PRIMARY KEY,           -- E########
+  sec_code VARCHAR(10),                       -- 5桁または4桁。listed_info と JOIN するときは末尾0切って4桁化
+  filer_name VARCHAR(255),
+  filer_name_en VARCHAR(255),
+  filer_type VARCHAR(50),                     -- 提出者種別
+  listed_division VARCHAR(50),                -- 上場区分
+  industry VARCHAR(100),
+  corp_number VARCHAR(13),                    -- 法人番号
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_sec_code (sec_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- EDINET 提出書類メタ (XBRL 本体は parse 後ファクトとして financial_facts に展開、本テーブルは index)
+-- 日付ループで /api/v2/documents.json から取得。
+-- doc_type_code:
+--   120=有価証券報告書、130=訂正有価証券報告書、140=四半期報告書(廃止予定)、
+--   150=訂正四半期報告書、160=半期報告書、170=訂正半期報告書、180=臨時報告書、...
+-- parsed_at NULL かつ xbrl_flag=1 のレコードを parse_xbrl が拾って financial_facts に展開する
+-- ============================================================
+CREATE TABLE IF NOT EXISTS edinet_documents (
+  doc_id VARCHAR(20) PRIMARY KEY,             -- S100XXXX
+  edinet_code CHAR(6),
+  sec_code VARCHAR(10),                       -- 元の 5桁。NULL = 非上場提出者
+  doc_type_code VARCHAR(10),
+  form_code VARCHAR(20),
+  doc_description VARCHAR(500),
+  period_start DATE,
+  period_end DATE,
+  submit_datetime TIMESTAMP NULL,
+  xbrl_flag TINYINT(1),
+  pdf_flag TINYINT(1),
+  csv_flag TINYINT(1),
+  withdrawal_status VARCHAR(5),
+  parsed_at TIMESTAMP NULL,
+  parse_error TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_sec_code (sec_code),
+  INDEX idx_doc_type (doc_type_code),
+  INDEX idx_period_end (period_end),
+  INDEX idx_submit_datetime (submit_datetime),
+  INDEX idx_parsed_at (parsed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- XBRL ファクト (EAV)
+-- 1 doc あたり数百〜千件の fact を 1 行 1 ファクトで格納。
+-- なぜ EAV か:
+--   - J-GAAP / IFRS / US-GAAP で要素名が異なり、フラットテーブルだと縦に伸ばせない
+--   - 連結/単体/前期/前々期 等のコンテキスト次元が爆発する
+--   - 検索は (sec_code → doc_id → element_id) 順で hop すれば index で速い
+-- 5 年 × 4000 社 × 年 1〜2 報告 ≈ 数 GB 想定。MariaDB で扱える範囲。
+--
+-- 格納方針:
+--   - 数値ファクト (xbrli:decimalItemType / monetaryItemType / pureItemType / sharesItemType) → value_num
+--   - 日付ファクト (dateItemType) → value_text に ISO 文字列で
+--   - bool / 短い文字列 (会計基準・連結区分など DEI) → value_text
+--   - textBlockItemType (会計方針本文 etc.) はスキップ (長文 + parse 目的外)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS financial_facts (
+  doc_id VARCHAR(20) NOT NULL,                -- edinet_documents.doc_id への外部参照 (FK は張らない: parse 順序非依存にする)
+  -- element_id / context_ref は XBRL 仕様上 ASCII (XML NCName + ':') なので ASCII collation で十分。
+  -- utf8mb4 だと VARCHAR(255)×4 で PK サイズが 3072 bytes 上限に当たるため、ASCII にして 500 まで取れるようにしている。
+  -- 実例: ネストしたセグメント次元持ちの context_ref は 200 文字超え得る。
+  element_id VARCHAR(500) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, -- 例: jppfs_cor:NetSales / jpdei_cor:AccountingStandardsDEI
+  context_ref VARCHAR(500) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, -- 例: CurrentYearDuration / Prior1YearInstant_NonConsolidatedMember
+  period_type ENUM('instant','duration','forever') NOT NULL,
+  period_start DATE NULL,                     -- duration の開始 / instant・forever のとき NULL
+  period_end DATE NULL,                       -- duration の終了 / instant の日付 / forever のとき NULL
+  unit_ref VARCHAR(255) NULL,                 -- arelle が解決した unit 文字列。例: iso4217:JPY / xbrli:shares / iso4217:JPY/xbrli:shares (per-share)
+  -- 概念の XBRL item type。arelle が DTS 解決して取得。screening では「monetary だけ」「shares だけ」等で絞るのに使える。
+  -- 主な値: monetaryItemType / sharesItemType / pureItemType / percentItemType / decimalItemType /
+  --         dateItemType / booleanItemType / stringItemType / textBlockItemType / nonNegativeIntegerItemType etc.
+  item_type VARCHAR(50) NULL,
+  decimals SMALLINT NULL,                     -- XBRL の decimals 属性 (-6 = 百万円単位)
+  value_num DECIMAL(28,4) NULL,               -- 数値ファクト (numeric concept のみ)
+  value_text MEDIUMTEXT NULL,                 -- 数値以外 (date / bool / 文字列 / fraction の "num/denom" 表現)
+  is_consolidated TINYINT(1) NULL,            -- context dimension の ConsolidatedOrNonConsolidatedAxis から判定 (NonConsolidated=0, Consolidated/無印=1)
+  PRIMARY KEY (doc_id, element_id, context_ref),
+  INDEX idx_element (element_id),
+  INDEX idx_doc (doc_id),
+  INDEX idx_item_type (item_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
 -- 取得ジョブ管理
 -- ============================================================
 CREATE TABLE IF NOT EXISTS fetch_log (
