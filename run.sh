@@ -121,6 +121,24 @@ case "${1:-}" in
       "$IMAGE_NAME" python -m src.backtest "$@"
     ;;
 
+  notify)
+    # シグナル検知 + Discord 通知。"notify" 以降の引数を src.notify に passthrough。
+    # 例:
+    #   ./run.sh notify
+    #     # default: universe=all, conditions=sma_cross_buy,macd_cross_buy,volume_spike
+    #   ./run.sh notify --conditions volume_spike --params 'volume_spike:mult=5'
+    #   ./run.sh notify --date 2026-05-29 --dry-run
+    # DISCORD_WEBHOOK_URL は .env から読む。
+    shift
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "$IMAGE_NAME" python -m src.notify "$@"
+    ;;
+
   shell)
     docker run --rm -it \
       --network host \
@@ -213,7 +231,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: $0 {build|listed|calendar|calendar-diff|prices|prices-bg|prices-diff|prices-one|backtest|shell|web-init|web|web-rebuild|web-logs|web-stop}"
+    echo "Usage: $0 {build|listed|calendar|calendar-diff|prices|prices-bg|prices-diff|prices-one|backtest|notify|shell|web-init|web|web-rebuild|web-logs|web-stop}"
     echo ""
     echo "  build              Build backend image (Python worker)"
     echo "  listed             Fetch listed companies master"
@@ -225,6 +243,8 @@ case "${1:-}" in
     echo "  prices-one DATE    Fetch daily prices for one date (YYYY-MM-DD)"
     echo "  backtest --strategy SMA_CROSS|RSI_MEAN_REVERSION|MACD_CROSS --universe ... --from ... --to ..."
     echo "                     Run a backtest and persist results to backtest_runs/_trades/_equity"
+    echo "  notify [--conditions ... --universe ... --params ... --date ... --dry-run]"
+    echo "                     Detect signals on the latest trade_date and POST to Discord webhook"
     echo "  shell              Open shell inside backend (debug)"
     echo "  web-init           Bootstrap Next.js scaffold into ./frontend (run once)"
     echo "  web                Build + start Next.js (production, detached, idempotent)"
