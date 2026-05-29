@@ -363,28 +363,37 @@ def format_hits(hits: list[Hit], target_date: date) -> list[str]:
     return messages
 
 
-def build_watchlist_files(hits: list[Hit]) -> list[tuple[str, bytes]]:
-    """TradingView 用ウォッチリスト (buy.txt / sell.txt) を生成。
+def build_watchlist_files(
+    hits: list[Hit], target_date: date
+) -> list[tuple[str, bytes]]:
+    """TradingView 用ウォッチリスト (`YYYY-MM-DD buy.txt` / `YYYY-MM-DD sell.txt`) を生成。
 
-    フォーマット: `TSE:<4桁コード>` 1 行 1 銘柄 (東証銘柄前提)。
-    `_sell` 終わりの condition は sell に、それ以外 (`_buy` / `volume_spike` 等)
-    は buy にまとめる。重複は除去 + code 順にソート。空ファイルは生成しない。
+    - フォーマット: `TSE:<コード>` 1 行 1 銘柄 (東証銘柄前提)
+    - `_sell` 終わりの condition は sell、それ以外は buy にまとめる
+    - 重複コードは除去
+    - 当日 close **降順** (高い順、同値は code 昇順で安定化)
+    - 0 件の側はファイル自体生成しない
+    - ファイル名は TradingView インポート時にそのままウォッチリスト名になるので
+      `YYYY-MM-DD buy` / `YYYY-MM-DD sell` の形式
     """
-    buy: set[str] = set()
-    sell: set[str] = set()
+    # code → close (同じ code が複数 condition で hit したとき close は同じなので上書き OK)
+    buy: dict[str, float] = {}
+    sell: dict[str, float] = {}
     for h in hits:
+        close = float(h.detail.get("close", 0.0))
         if h.condition.endswith("_sell"):
-            sell.add(h.code)
+            sell[h.code] = close
         else:
-            buy.add(h.code)
+            buy[h.code] = close
 
+    date_str = target_date.isoformat()
     out: list[tuple[str, bytes]] = []
-    if buy:
-        body = "\n".join(f"TSE:{c}" for c in sorted(buy))
-        out.append(("buy.txt", body.encode("utf-8")))
-    if sell:
-        body = "\n".join(f"TSE:{c}" for c in sorted(sell))
-        out.append(("sell.txt", body.encode("utf-8")))
+    for label, mapping in (("buy", buy), ("sell", sell)):
+        if not mapping:
+            continue
+        ordered = sorted(mapping.items(), key=lambda kv: (-kv[1], kv[0]))
+        body = "\n".join(f"TSE:{code}" for code, _ in ordered)
+        out.append((f"{date_str} {label}.txt", body.encode("utf-8")))
     return out
 
 
@@ -586,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
             h.company_name = names.get(h.code)
 
     messages = format_hits(hits, target_date)
-    attachments = build_watchlist_files(hits)
+    attachments = build_watchlist_files(hits, target_date)
     webhook = args.webhook_url or os.environ.get("DISCORD_WEBHOOK_URL")
 
     if args.dry_run or not webhook:
