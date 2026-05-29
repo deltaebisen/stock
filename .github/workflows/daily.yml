@@ -1,0 +1,27 @@
+name: Daily batch (prices + notify)
+
+# 毎日 17:00 JST = 08:00 UTC に NAS 上で順番に実行する。
+# GHA schedule は数分遅延があるが、市場 15:00 close + 1〜2h でデータ確定の前提なら問題なし。
+# 手動キックは workflow_dispatch から。
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  daily:
+    runs-on: self-hosted
+    steps:
+      - name: Fetch listed companies master
+        # listed_info は変動少ないが、scale_category / market_code 等が日々更新されるので
+        # 毎日先頭で軽く流す (~数十秒)。
+        run: bash "$NAS_WORKSPACE/run.sh" listed
+
+      - name: Fetch daily quotes (diff)
+        # daily_quotes の MAX(trade_date) 以降だけ取得。営業日 1 日分なら 1〜2 分。
+        run: bash "$NAS_WORKSPACE/run.sh" prices-diff
+
+      - name: Notify Discord with signal hits
+        # default 条件: MACD(20,200,10) buy+sell × 東証プライム × 売買代金 1B 以上 × 価格 4000 以下。
+        # DISCORD_WEBHOOK_URL は NAS 側 .env から読まれる。
+        run: bash "$NAS_WORKSPACE/run.sh" notify
