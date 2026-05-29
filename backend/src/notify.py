@@ -39,6 +39,7 @@ Webhook URL は `.env` の `DISCORD_WEBHOOK_URL` から読む。`--dry-run` か 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -362,8 +363,50 @@ def format_hits(hits: list[Hit], target_date: date) -> list[str]:
     return messages
 
 
-def send_to_discord(webhook_url: str, content: str) -> None:
-    resp = requests.post(webhook_url, json={"content": content}, timeout=15)
+def build_watchlist_files(hits: list[Hit]) -> list[tuple[str, bytes]]:
+    """TradingView 用ウォッチリスト (buy.txt / sell.txt) を生成。
+
+    フォーマット: `TSE:<4桁コード>` 1 行 1 銘柄 (東証銘柄前提)。
+    `_sell` 終わりの condition は sell に、それ以外 (`_buy` / `volume_spike` 等)
+    は buy にまとめる。重複は除去 + code 順にソート。空ファイルは生成しない。
+    """
+    buy: set[str] = set()
+    sell: set[str] = set()
+    for h in hits:
+        if h.condition.endswith("_sell"):
+            sell.add(h.code)
+        else:
+            buy.add(h.code)
+
+    out: list[tuple[str, bytes]] = []
+    if buy:
+        body = "\n".join(f"TSE:{c}" for c in sorted(buy))
+        out.append(("buy.txt", body.encode("utf-8")))
+    if sell:
+        body = "\n".join(f"TSE:{c}" for c in sorted(sell))
+        out.append(("sell.txt", body.encode("utf-8")))
+    return out
+
+
+def send_to_discord(
+    webhook_url: str,
+    content: str,
+    files: list[tuple[str, bytes]] | None = None,
+) -> None:
+    """Discord webhook に POST。`files` 指定時は multipart/form-data で添付。"""
+    if files:
+        multipart = {
+            f"files[{i}]": (name, data, "text/plain")
+            for i, (name, data) in enumerate(files)
+        }
+        resp = requests.post(
+            webhook_url,
+            data={"payload_json": json.dumps({"content": content})},
+            files=multipart,
+            timeout=30,
+        )
+    else:
+        resp = requests.post(webhook_url, json={"content": content}, timeout=15)
     if resp.status_code >= 400:
         raise RuntimeError(
             f"Discord webhook {resp.status_code}: {resp.text[:200]}"
@@ -543,6 +586,7 @@ def main(argv: list[str] | None = None) -> int:
             h.company_name = names.get(h.code)
 
     messages = format_hits(hits, target_date)
+    attachments = build_watchlist_files(hits)
     webhook = args.webhook_url or os.environ.get("DISCORD_WEBHOOK_URL")
 
     if args.dry_run or not webhook:
@@ -554,11 +598,20 @@ def main(argv: list[str] | None = None) -> int:
         for m in messages:
             print(m)
             print("---")
+        for name, data in attachments:
+            print(f"=== {name} ===")
+            print(data.decode("utf-8"))
+            print("---")
         return 0
 
-    for m in messages:
-        send_to_discord(webhook, m)
-    print(f"[notify] sent {len(messages)} message(s) to Discord")
+    # 添付は最初のメッセージにのみ付ける (Discord 上で本文の下に表示される)
+    for i, m in enumerate(messages):
+        files = attachments if i == 0 else None
+        send_to_discord(webhook, m, files)
+    print(
+        f"[notify] sent {len(messages)} message(s) to Discord "
+        f"(attachments: {[n for n, _ in attachments]})"
+    )
     return 0
 
 
