@@ -5,7 +5,9 @@
 
 default 動作 (引数なし):
   - 条件: MACD(20, 200, 10) の ゴールデンクロス (buy) + デッドクロス (sell)
-  - スクリーニング: 東証プライム / 直近20日平均売買代金 ≥ 1B 円 / 当日 close ≤ 4000 円
+  - 個別株スクリーニング: 東証プライム / 直近20日平均売買代金 ≥ 1B 円 / 当日 close ≤ 4000 円
+  - ETF (sector33_code='9999') は **同じ流動性 / 価格条件で独立に抽出**。`--no-etf` で無効化
+  - 添付ファイル: 個別株 buy/sell + ETF buy/sell の最大 4 ファイル
 
 実行例:
   python -m src.notify
@@ -189,6 +191,7 @@ class Hit:
     condition: str
     detail: dict[str, Any]
     company_name: str | None = None
+    is_etf: bool = False
 
 
 def get_latest_trade_date(engine) -> date | None:
@@ -210,6 +213,25 @@ def screen_by_market(
         f"SELECT code FROM listed_info "
         f"WHERE code IN ({placeholders}) "
         f"  AND (market_code = :mkt OR market_name LIKE CONCAT(:mkt, '%'))"
+    )
+    with engine.connect() as conn:
+        return [r[0] for r in conn.execute(text(sql), params).fetchall()]
+
+
+# J-Quants V2 で ETF は sector33_code='9999' (= "その他" 33業種区分外)
+ETF_SECTOR33_CODE = "9999"
+
+
+def screen_etfs(engine, codes: list[str]) -> list[str]:
+    """`listed_info.sector33_code='9999'` の銘柄だけ抽出 (= ETF / ETN)。"""
+    if not codes:
+        return []
+    placeholders = ", ".join(f":c{i}" for i in range(len(codes)))
+    params: dict[str, Any] = {f"c{i}": c for i, c in enumerate(codes)}
+    params["s33"] = ETF_SECTOR33_CODE
+    sql = (
+        f"SELECT code FROM listed_info "
+        f"WHERE code IN ({placeholders}) AND sector33_code = :s33"
     )
     with engine.connect() as conn:
         return [r[0] for r in conn.execute(text(sql), params).fetchall()]
@@ -324,30 +346,41 @@ def _format_hit_line(h: Hit) -> str:
 
 
 def format_hits(hits: list[Hit], target_date: date) -> list[str]:
-    """Discord に送る複数メッセージにチャンク化。"""
+    """Discord に送る複数メッセージにチャンク化。(is_etf, condition) 単位でセクション化。"""
     if not hits:
         return [f"📊 **{target_date}** シグナル検知 0 件"]
 
-    by_cond: dict[str, list[Hit]] = {}
+    # (is_etf, condition) → [Hit]
+    grouped: dict[tuple[bool, str], list[Hit]] = {}
     for h in hits:
-        by_cond.setdefault(h.condition, []).append(h)
+        grouped.setdefault((h.is_etf, h.condition), []).append(h)
 
-    # volume_spike は ratio 降順、他は code 昇順で並べる
-    for cond, group in by_cond.items():
+    # volume_spike は ratio 降順、他は close 降順で並べる
+    for key, group in grouped.items():
+        cond = key[1]
         if cond == "volume_spike":
             group.sort(key=lambda h: h.detail.get("ratio", 0), reverse=True)
         else:
-            group.sort(key=lambda h: h.code)
+            group.sort(key=lambda h: -h.detail.get("close", 0))
 
-    header = f"📊 **{target_date}** シグナル検知 ({len(hits)} 件)"
+    n_equity = sum(1 for h in hits if not h.is_etf)
+    n_etf = sum(1 for h in hits if h.is_etf)
+    header = (
+        f"📊 **{target_date}** シグナル検知 "
+        f"(個別 {n_equity} 件 / ETF {n_etf} 件)"
+    )
     sections: list[str] = []
-    for cond in sorted(by_cond.keys()):
-        group = by_cond[cond]
-        shown = group[:MAX_PER_CONDITION_DISPLAY]
-        body = "\n".join(_format_hit_line(h) for h in shown)
-        if len(group) > len(shown):
-            body += f"\n... +{len(group) - len(shown)} 件"
-        sections.append(f"\n__**{cond}**__ ({len(group)} 件)\n{body}")
+    # equity 系を先、ETF 系を後にまとめる。各カテゴリ内は condition 名で sort
+    for is_etf in (False, True):
+        keys = sorted(k for k in grouped.keys() if k[0] == is_etf)
+        for key in keys:
+            group = grouped[key]
+            shown = group[:MAX_PER_CONDITION_DISPLAY]
+            body = "\n".join(_format_hit_line(h) for h in shown)
+            if len(group) > len(shown):
+                body += f"\n... +{len(group) - len(shown)} 件"
+            label = ("ETF " if is_etf else "") + key[1]
+            sections.append(f"\n__**{label}**__ ({len(group)} 件)\n{body}")
 
     # ヘッダ + セクション群を MAX_MESSAGE_CHARS 単位に分割
     messages: list[str] = []
@@ -366,34 +399,45 @@ def format_hits(hits: list[Hit], target_date: date) -> list[str]:
 def build_watchlist_files(
     hits: list[Hit], target_date: date
 ) -> list[tuple[str, bytes]]:
-    """TradingView 用ウォッチリスト (`YYYY-MM-DD buy.txt` / `YYYY-MM-DD sell.txt`) を生成。
+    """TradingView 用ウォッチリストを生成。
+
+    生成ファイル (該当 0 件の側はスキップ):
+      - `YYYY-MM-DD buy.txt`      : 個別株 buy
+      - `YYYY-MM-DD sell.txt`     : 個別株 sell
+      - `YYYY-MM-DD etf-buy.txt`  : ETF buy
+      - `YYYY-MM-DD etf-sell.txt` : ETF sell
 
     - フォーマット: `TSE:<コード>` 1 行 1 銘柄 (東証銘柄前提)
-    - `_sell` 終わりの condition は sell、それ以外は buy にまとめる
-    - 重複コードは除去
-    - 当日 close **降順** (高い順、同値は code 昇順で安定化)
-    - 0 件の側はファイル自体生成しない
-    - ファイル名は TradingView インポート時にそのままウォッチリスト名になるので
-      `YYYY-MM-DD buy` / `YYYY-MM-DD sell` の形式
+    - `_sell` 終わりの condition は sell、それ以外は buy
+    - 重複コードは除去、当日 close **降順** (同値は code 昇順)
+    - ファイル名は TradingView インポート時にそのままウォッチリスト名になる
     """
-    # code → close (同じ code が複数 condition で hit したとき close は同じなので上書き OK)
-    buy: dict[str, float] = {}
-    sell: dict[str, float] = {}
+    # (is_etf, is_sell) → {code: close}
+    buckets: dict[tuple[bool, bool], dict[str, float]] = {
+        (False, False): {},  # equity buy
+        (False, True): {},   # equity sell
+        (True, False): {},   # etf buy
+        (True, True): {},    # etf sell
+    }
     for h in hits:
         close = float(h.detail.get("close", 0.0))
-        if h.condition.endswith("_sell"):
-            sell[h.code] = close
-        else:
-            buy[h.code] = close
+        is_sell = h.condition.endswith("_sell")
+        buckets[(h.is_etf, is_sell)][h.code] = close
 
     date_str = target_date.isoformat()
+    name_map = {
+        (False, False): "buy",
+        (False, True): "sell",
+        (True, False): "etf-buy",
+        (True, True): "etf-sell",
+    }
     out: list[tuple[str, bytes]] = []
-    for label, mapping in (("buy", buy), ("sell", sell)):
+    for key, mapping in buckets.items():
         if not mapping:
             continue
         ordered = sorted(mapping.items(), key=lambda kv: (-kv[1], kv[0]))
         body = "\n".join(f"TSE:{code}" for code, _ in ordered)
-        out.append((f"{date_str} {label}.txt", body.encode("utf-8")))
+        out.append((f"{date_str} {name_map[key]}.txt", body.encode("utf-8")))
     return out
 
 
@@ -490,7 +534,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--market",
         default="プライム",
-        help="市場フィルタ。market_code 完全一致 or market_name 前方一致 (例: 'プライム' / '0111')。空文字で無効",
+        help="市場フィルタ (個別株)。market_code 完全一致 or market_name 前方一致 (例: 'プライム' / '0111')。空文字で無効",
+    )
+    p.add_argument(
+        "--no-etf",
+        action="store_true",
+        help="ETF (sector33_code='9999') の抽出を無効化",
     )
     p.add_argument(
         "--min-turnover",
@@ -553,20 +602,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[notify] conditions={[c.key for c in conditions]}")
 
     # universe
-    codes = resolve_universe(engine, args.universe)
-    if not codes:
+    universe_codes = resolve_universe(engine, args.universe)
+    if not universe_codes:
         print(f"[notify][FATAL] universe '{args.universe}' で 0 銘柄", file=sys.stderr)
         return 1
-    print(f"[notify] universe={args.universe} → {len(codes)} 銘柄")
+    print(f"[notify] universe={args.universe} → {len(universe_codes)} 銘柄")
 
-    # スクリーニング: market → 売買代金平均 / 価格
-    market = args.market.strip() if args.market else None
-    if market:
-        codes = screen_by_market(engine, codes, market)
-        print(f"[notify] after market='{market}' → {len(codes)} 銘柄")
     min_turn = args.min_turnover if args.min_turnover and args.min_turnover > 0 else None
     max_price = args.max_price if args.max_price and args.max_price > 0 else None
-    if min_turn is not None or max_price is not None:
+
+    def _apply_liquidity(label: str, codes: list[str]) -> list[str]:
+        if min_turn is None and max_price is None:
+            return codes
         codes = screen_by_liquidity_and_price(
             engine, codes, target_date, args.screen_days, min_turn, max_price
         )
@@ -575,8 +622,31 @@ def main(argv: list[str] | None = None) -> int:
             cond_str.append(f"avg_turnover≥{min_turn:,.0f}")
         if max_price:
             cond_str.append(f"close≤{max_price:,.0f}")
-        print(f"[notify] after {'/'.join(cond_str)} → {len(codes)} 銘柄")
-    if not codes:
+        print(f"[notify] {label} after {'/'.join(cond_str)} → {len(codes)} 銘柄")
+        return codes
+
+    # 個別株: 市場フィルタ → 流動性 / 価格
+    equity_market = args.market.strip() if args.market else None
+    if equity_market:
+        equity_codes = screen_by_market(engine, universe_codes, equity_market)
+        print(
+            f"[notify] equity after market='{equity_market}' → {len(equity_codes)} 銘柄"
+        )
+    else:
+        equity_codes = universe_codes
+    equity_codes = _apply_liquidity("equity", equity_codes)
+
+    # ETF: sector33_code='9999' → 流動性 / 価格 (同じ閾値)
+    if args.no_etf:
+        etf_codes: list[str] = []
+    else:
+        etf_codes = screen_etfs(engine, universe_codes)
+        print(f"[notify] etf after sector33='{ETF_SECTOR33_CODE}' → {len(etf_codes)} 銘柄")
+        etf_codes = _apply_liquidity("etf", etf_codes)
+    etf_set = set(etf_codes)
+    # detect は重複させても無駄なので union
+    all_codes = list(dict.fromkeys(equity_codes + etf_codes))
+    if not all_codes:
         print("[notify] スクリーニング後 0 銘柄", file=sys.stderr)
 
     # lookback (warmup 営業日 × 1.6 + 余裕 30 を暦日換算の最低ラインに)
@@ -585,8 +655,14 @@ def main(argv: list[str] | None = None) -> int:
     lookback = max(args.lookback_days, needed)
     print(f"[notify] lookback={lookback} days (max warmup bars={max_warmup})")
 
-    hits = detect(engine, codes, conditions, target_date, lookback)
-    print(f"[notify] detected {len(hits)} hits")
+    hits = detect(engine, all_codes, conditions, target_date, lookback)
+    for h in hits:
+        h.is_etf = h.code in etf_set
+    print(
+        f"[notify] detected {len(hits)} hits "
+        f"(equity={sum(1 for h in hits if not h.is_etf)}, "
+        f"etf={sum(1 for h in hits if h.is_etf)})"
+    )
 
     if hits:
         unique = sorted({h.code for h in hits})
