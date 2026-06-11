@@ -4,7 +4,7 @@
 指定の条件で発火した銘柄を Discord webhook に通知する。
 
 default 動作 (引数なし):
-  - 条件: MACD(20, 200, 10) の ゴールデンクロス (buy) + デッドクロス (sell)
+  - 条件: MACD(12, 26, 9) の ゴールデンクロス (buy) + デッドクロス (sell)
   - 個別株スクリーニング: 東証プライム / 直近20日平均売買代金 ≥ 1B 円 / 当日 close ≤ 4000 円
   - ETF (sector33_code='9999') は **同じ流動性 / 価格条件で独立に抽出**。`--no-etf` で無効化
   - 添付ファイル: 個別株 buy/sell + ETF buy/sell の最大 4 ファイル
@@ -521,8 +521,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--params",
         default=(
-            "macd_cross_buy:fast=20,slow=200,signal=10;"
-            "macd_cross_sell:fast=20,slow=200,signal=10"
+            "macd_cross_buy:fast=12,slow=26,signal=9;"
+            "macd_cross_sell:fast=12,slow=26,signal=9"
         ),
         help="条件別パラメータ。'cond:k=v,k=v;cond:k=v' 形式",
     )
@@ -568,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
         "--lookback-days",
         type=int,
         default=400,
-        help="DB ロード履歴日数 (default 400 = MACD(_,200,_) の warmup 用)",
+        help="DB ロード履歴日数 (default 400 = 長期 SMA/MACD warmup の余裕)",
     )
     p.add_argument(
         "--dry-run",
