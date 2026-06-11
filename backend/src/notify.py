@@ -445,8 +445,11 @@ def send_to_discord(
     webhook_url: str,
     content: str,
     files: list[tuple[str, bytes]] | None = None,
-) -> None:
-    """Discord webhook に POST。`files` 指定時は multipart/form-data で添付。"""
+) -> int:
+    """Discord webhook に POST。`files` 指定時は multipart/form-data で添付。
+
+    成功時の HTTP ステータス (通常 204) を返す。
+    """
     if files:
         multipart = {
             f"files[{i}]": (name, data, "text/plain")
@@ -457,13 +460,25 @@ def send_to_discord(
             data={"payload_json": json.dumps({"content": content})},
             files=multipart,
             timeout=30,
+            allow_redirects=False,
         )
     else:
-        resp = requests.post(webhook_url, json={"content": content}, timeout=15)
-    if resp.status_code >= 400:
-        raise RuntimeError(
-            f"Discord webhook {resp.status_code}: {resp.text[:200]}"
+        resp = requests.post(
+            webhook_url,
+            json={"content": content},
+            timeout=15,
+            allow_redirects=False,
         )
+    # Discord webhook の成功は 200 / 204。3xx を追従させると POST→GET に化けて
+    # webhook 情報を 200 で取得するだけ (= 何も投稿されない) になり偽成功するので、
+    # リダイレクトは追わず失敗扱いにする (古い discordapp.com URL 等が原因)。
+    if resp.is_redirect or resp.status_code >= 300:
+        loc = resp.headers.get("Location", "")
+        raise RuntimeError(
+            f"Discord webhook {resp.status_code}"
+            f"{f' → {loc}' if loc else ''}: {resp.text[:200]}"
+        )
+    return resp.status_code
 
 
 # -------------------------------------------------------------------
@@ -690,12 +705,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # 添付は最初のメッセージにのみ付ける (Discord 上で本文の下に表示される)
+    statuses = []
     for i, m in enumerate(messages):
         files = attachments if i == 0 else None
-        send_to_discord(webhook, m, files)
+        statuses.append(send_to_discord(webhook, m, files))
     print(
         f"[notify] sent {len(messages)} message(s) to Discord "
-        f"(attachments: {[n for n, _ in attachments]})"
+        f"(http={statuses}, attachments: {[n for n, _ in attachments]})"
     )
     return 0
 
