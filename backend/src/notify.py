@@ -4,14 +4,21 @@
 指定の条件で発火した銘柄を Discord webhook に通知する。
 
 default 動作 (引数なし):
-  - 条件: MACD(12, 26, 9) の ゴールデンクロス (buy) + デッドクロス (sell)
+  - 条件: One-Sided Gaussian Filter [Loxx] の方向転換 (buy=上向き転換 / sell=下向き転換)
+    かつ 200MA の傾きでフィルタ (buy は 200MA 上向き時のみ、sell は下向き時のみ)
   - 個別株スクリーニング: 東証プライム / 直近20日平均売買代金 ≥ 1B 円 / 当日 close ≤ 4000 円
   - ETF (sector33_code='9999') は **同じ流動性 / 価格条件で独立に抽出**。`--no-etf` で無効化
   - 添付ファイル: 個別株 buy/sell + ETF buy/sell の最大 4 ファイル
 
+条件・パラメータ・スクリーニング閾値は JSON 設定ファイル (`--config`、default
+`/app/config/notify.json`) で変更できる。CLI 引数を明示指定した場合はそちらが優先。
+
 実行例:
   python -m src.notify
-      # 上記 default
+      # 上記 default (設定ファイルがあればそれを反映)
+
+  python -m src.notify --config /app/config/my.json
+      # 別の設定ファイルで実行
 
   python -m src.notify --conditions sma_cross_buy,volume_spike \\
       --max-price 2000 --min-turnover 500000000
@@ -20,13 +27,18 @@ default 動作 (引数なし):
       # 対象日を固定して Discord 送信せず stdout に流す (検証用)
 
 条件:
+  - `osgf_buy` / `osgf_sell`
+      → One-Sided Gaussian Filter (fib-gaussian 加重 MA + 2-pole Ehlers super smoother)
+        の方向転換 + 200MA トレンドフィルタ。params (Pine 変数名に一致) で smthper /
+        extrasmthper / atrper / mult / srcoption / trend_ma / trend_slope / trend_filter を変更可
   - `sma_cross_buy` / `sma_cross_sell` / `macd_cross_buy` / `macd_cross_sell` /
     `rsi_mean_reversion_buy` / `rsi_mean_reversion_sell`
       → backtest_strategies.py の戦略を流用して当日 (target_date) の signal を判定
   - `volume_spike`
       → 直近 window 日の平均出来高に対し当日が mult 倍以上で発火
 
-パラメータは `cond:k=v,k=v;cond:k=v` 形式で `--params` に渡す。
+パラメータは `cond:k=v,k=v;cond:k=v` 形式で `--params` に渡す (設定ファイルの
+`params` オブジェクトでも指定可)。
 
 スクリーニング:
   --market           市場フィルタ。market_code 完全一致 or market_name 前方一致
@@ -102,6 +114,29 @@ class StrategySignalCondition(Condition):
         return self.strategy.required_warmup()
 
 
+class OsgfSignalCondition(StrategySignalCondition):
+    """osgf 戦略ベース + Pine の ATR チャンネル (smax/smin) を detail に付与。
+
+    シグナル判定は StrategySignalCondition と同じ (out の方向転換 + 200MA フィルタ)。
+    加えて atr / upper(smax) / lower(smin) を返して通知にストップ参考値として載せる。
+    """
+
+    def evaluate(self, df: pd.DataFrame) -> dict[str, Any] | None:
+        base = super().evaluate(df)
+        if base is None:
+            return None
+        _out, atr, upper, lower = self.strategy.channel(df)
+
+        def _last(s: pd.Series) -> float | None:
+            v = s.iloc[-1]
+            return float(v) if not pd.isna(v) else None
+
+        base["atr"] = _last(atr)
+        base["upper"] = _last(upper)
+        base["lower"] = _last(lower)
+        return base
+
+
 class VolumeSpikeCondition(Condition):
     """直近 window 日平均出来高に対し当日が mult 倍以上なら発火。
 
@@ -148,7 +183,7 @@ class VolumeSpikeCondition(Condition):
 # 条件レジストリ
 # -------------------------------------------------------------------
 
-STRATEGY_BACKED = {"sma_cross", "macd_cross", "rsi_mean_reversion"}
+STRATEGY_BACKED = {"sma_cross", "macd_cross", "rsi_mean_reversion", "osgf"}
 VOLUME_SPIKE_DEFAULTS: dict[str, Any] = {"window": 20, "mult": 3.0, "min_avg": 10000}
 
 
@@ -170,6 +205,8 @@ def make_condition(name: str, params: dict[str, Any]) -> Condition:
 
     if strat in STRATEGY_BACKED:
         merged = {**DEFAULT_PARAMS.get(strat, {}), **params}
+        if strat == "osgf":
+            return OsgfSignalCondition(strat, merged, direction)
         return StrategySignalCondition(strat, merged, direction)
 
     raise ValueError(
@@ -341,6 +378,10 @@ def _format_hit_line(h: Hit) -> str:
         extras.append(f"¥{d['close']:,.0f}")
     if "ratio" in d:
         extras.append(f"vol×{d['ratio']:.1f}")
+    # OSGF の ATR チャンネル: buy は下限(smin)、sell は上限(smax)をストップ参考に
+    if d.get("lower") is not None and d.get("upper") is not None:
+        stop = d["upper"] if h.condition.endswith("_sell") else d["lower"]
+        extras.append(f"SL¥{stop:,.0f}")
     suffix = (" / ".join(extras)) if extras else ""
     return f"`{h.code}` {name} {suffix}".rstrip()
 
@@ -524,54 +565,97 @@ def _parse_cond_params(s: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+# 設定ファイル未指定時のデフォルトパス (コンテナ内。run.sh が backend/config をマウント)
+DEFAULT_CONFIG_PATH = "/app/config/notify.json"
+
+# CLI / 設定ファイル 双方が未指定のときの最終フォールバック。
+# 条件別パラメータ (osgf の smthper 等) は backtest_strategies.py の DEFAULT_PARAMS
+# に委譲するので、ここには持たない。
+CONFIG_FALLBACKS: dict[str, Any] = {
+    "conditions": "osgf_buy,osgf_sell",
+    "universe": "all",
+    "market": "プライム",
+    "min_turnover": 1_000_000_000.0,
+    "max_price": 4000.0,
+    "screen_days": 20,
+    "lookback_days": 400,
+    "no_etf": False,
+}
+
+
+def _load_config(path: str | None) -> dict[str, Any]:
+    """JSON 設定ファイルを読む。存在しなければ空 dict (= 全部フォールバック)。
+
+    明示指定 (`--config`) したのに読めない場合だけ例外にし、default パスの不在は
+    黙って無視する (設定ファイル無しでも動く)。
+    """
+    if not path:
+        return {}
+    if not os.path.exists(path):
+        if path != DEFAULT_CONFIG_PATH:
+            raise FileNotFoundError(f"config not found: {path}")
+        return {}
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"config root must be a JSON object: {path}")
+    return cfg
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="notify", description="シグナル検知 + Discord 通知"
     )
+    # 設定ファイルで上書き可能な引数は default=None にして「CLI で明示指定されたか」を
+    # 判別する。未指定 (None) なら 設定ファイル → CONFIG_FALLBACKS の順に解決する。
+    p.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG_PATH,
+        help=f"JSON 設定ファイルのパス (default: {DEFAULT_CONFIG_PATH})。存在しなければ無視",
+    )
     p.add_argument(
         "--conditions",
-        default="macd_cross_buy,macd_cross_sell",
-        help="カンマ区切り。default: macd_cross_buy,macd_cross_sell",
+        default=None,
+        help="カンマ区切り。default: osgf_buy,osgf_sell",
     )
     p.add_argument(
         "--params",
-        default=(
-            "macd_cross_buy:fast=12,slow=26,signal=9;"
-            "macd_cross_sell:fast=12,slow=26,signal=9"
-        ),
-        help="条件別パラメータ。'cond:k=v,k=v;cond:k=v' 形式",
+        default=None,
+        help="条件別パラメータ。'cond:k=v,k=v;cond:k=v' 形式 (設定ファイルの params でも指定可)",
     )
     p.add_argument(
         "--universe",
-        default="all",
+        default=None,
         help="universe spec (backtest と同じ書式)。default: all (スクリーニングで絞る)",
     )
     p.add_argument(
         "--market",
-        default="プライム",
+        default=None,
         help="市場フィルタ (個別株)。market_code 完全一致 or market_name 前方一致 (例: 'プライム' / '0111')。空文字で無効",
     )
     p.add_argument(
         "--no-etf",
-        action="store_true",
+        action="store_const",
+        const=True,
+        default=None,
         help="ETF (sector33_code='9999') の抽出を無効化",
     )
     p.add_argument(
         "--min-turnover",
         type=float,
-        default=1_000_000_000.0,
+        default=None,
         help="直近 screen-days 平均売買代金 (円) の下限。default: 1e9 (=10億)。0 で無効",
     )
     p.add_argument(
         "--max-price",
         type=float,
-        default=4000.0,
+        default=None,
         help="当日 close (調整済) の上限 (円)。default: 4000。0 で無効",
     )
     p.add_argument(
         "--screen-days",
         type=int,
-        default=20,
+        default=None,
         help="売買代金平均の対象営業日数 (default 20)",
     )
     p.add_argument(
@@ -582,8 +666,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--lookback-days",
         type=int,
-        default=400,
-        help="DB ロード履歴日数 (default 400 = 長期 SMA/MACD warmup の余裕)",
+        default=None,
+        help="DB ロード履歴日数 (default 400 = 長期 SMA/MACD/OSGF warmup の余裕)",
     )
     p.add_argument(
         "--dry-run",
@@ -596,6 +680,31 @@ def main(argv: list[str] | None = None) -> int:
         help="DISCORD_WEBHOOK_URL の上書き (テスト用)",
     )
     args = p.parse_args(argv)
+
+    # 設定解決: CLI (明示指定) > 設定ファイル > CONFIG_FALLBACKS
+    cfg = _load_config(args.config)
+
+    def pick(name: str) -> Any:
+        cli_val = getattr(args, name)
+        if cli_val is not None:
+            return cli_val
+        if name in cfg:
+            return cfg[name]
+        return CONFIG_FALLBACKS[name]
+
+    for name in (
+        "conditions",
+        "universe",
+        "market",
+        "min_turnover",
+        "max_price",
+        "screen_days",
+        "lookback_days",
+        "no_etf",
+    ):
+        setattr(args, name, pick(name))
+    if cfg:
+        print(f"[notify] config={args.config}")
 
     engine = get_engine()
 
@@ -610,8 +719,15 @@ def main(argv: list[str] | None = None) -> int:
         target_date = latest
     print(f"[notify] target_date={target_date}")
 
-    # 条件構築
-    cond_params = _parse_cond_params(args.params)
+    # 条件構築。条件別パラメータは 設定ファイル params (dict) → CLI --params の順に
+    # マージ (CLI 優先)。どちらにも無い分は make_condition が DEFAULT_PARAMS で補完。
+    cond_params: dict[str, dict[str, Any]] = {}
+    for name, kv in (cfg.get("params") or {}).items():
+        if isinstance(kv, dict):
+            cond_params[name] = dict(kv)
+    if args.params is not None:
+        for name, kv in _parse_cond_params(args.params).items():
+            cond_params.setdefault(name, {}).update(kv)
     cond_names = [n.strip() for n in args.conditions.split(",") if n.strip()]
     conditions = [make_condition(n, cond_params.get(n, {})) for n in cond_names]
     print(f"[notify] conditions={[c.key for c in conditions]}")

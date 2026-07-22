@@ -217,16 +217,18 @@ case "${1:-}" in
     # シグナル検知 + Discord 通知。"notify" 以降の引数を src.notify に passthrough。
     # 例:
     #   ./run.sh notify
-    #     # default: universe=all, conditions=sma_cross_buy,macd_cross_buy,volume_spike
+    #     # default: 設定ファイル backend/config/notify.json (osgf_buy,osgf_sell + 200MA)
     #   ./run.sh notify --conditions volume_spike --params 'volume_spike:mult=5'
     #   ./run.sh notify --date 2026-05-29 --dry-run
-    # DISCORD_WEBHOOK_URL は .env から読む。
+    # 検知条件・パラメータ・スクリーニング閾値は backend/config/notify.json で調整する
+    # (/app/config にマウント)。DISCORD_WEBHOOK_URL は .env から読む。
     shift
     docker run --rm \
       --network host \
       --env-file .env \
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/backend/config:/app/config" \
       -v "$SCRIPT_DIR/data:/app/data" \
       "$IMAGE_NAME" python -m src.notify "$@"
     ;;
