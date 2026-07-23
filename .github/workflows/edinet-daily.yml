@@ -11,6 +11,9 @@ on:
 jobs:
   edinet:
     runs-on: self-hosted
+    # self-hosted runner は 1 並列なので、このジョブが長引くと daily batch (prices +
+    # notify) が queue で待たされる。想定 (数分) を大きく超えたら諦めて runner を返す。
+    timeout-minutes: 90
     steps:
       - name: Fetch EDINET document metadata (diff)
         # edinet_documents の MAX(submit_datetime) 以降を今日まで取得。
@@ -19,6 +22,15 @@ jobs:
 
       - name: Parse XBRL into financial_facts
         # parsed_at IS NULL のレコードを arelle で parse。新規取り込み分 (~1日分) は
-        # 数分で完了する想定。初回フルや積み残しが大量にあるときは時間がかかるので
-        # 必要に応じて手動で `./run.sh xbrl-bg` に切り替える。
+        # 数分で完了する想定。
+        #
+        # LIMIT で 1 回あたりの処理件数に蓋をしている。arelle は doc 1 件 5〜10 秒
+        # かかるので、積み残しが溜まった状態で無制限に走らせると 1 ジョブが十数時間
+        # 居座り、単一 runner を占有して他の daily batch を全部止めてしまう。
+        # (実際 2026-07 に arelle 未インストールでこのステップが失敗し続け、
+        #  積み残しが 4,500 件 = 約 7〜13 時間ぶんまで膨らんだ)
+        # 上限に当たっても parsed_at ベースで自然に翌日へ繰り越されるだけ。
+        # 大量の積み残しを一気に消化したいときは NAS で `./run.sh xbrl-bg` を使う。
+        env:
+          LIMIT: '300'
         run: bash "$NAS_WORKSPACE/run.sh" xbrl
