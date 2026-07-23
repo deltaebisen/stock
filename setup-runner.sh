@@ -121,6 +121,17 @@ docker run -d \
 # entrypoint が「deregister 済み runner を再利用すると壊れる」として exit 1 する。
 # 停止時に GitHub から deregister しなくなるので runner 一覧には残り続けるが、
 # persistent runner ではむしろそれが正しい。
+#
+# 注 4: 再起動直後に 1〜2 分 offline に見えるのは正常。
+#
+# 自動 deregister を切った副作用で、停止時に GitHub 側のセッションが残る。
+# 新プロセスはそれが期限切れになるまで接続できず、ログに
+#   A session for this runner already exists.
+#   Runner connect error: Error: Conflict. Retrying until reconnected.
+# を出しながらリトライする。2026-07-23 の実測で `docker restart` から online 復帰
+# まで 80 秒。**壊れているわけではないので放置してよい**。
+# 注 3 の無限ループ (Cannot configure the runner because it is already configured)
+# とは別物なので、ログのメッセージで見分けること。
 
 echo ""
 echo "Runner 起動済み。確認:"
