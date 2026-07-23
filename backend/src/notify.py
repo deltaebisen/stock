@@ -337,6 +337,18 @@ def fetch_company_names(engine, codes: list[str]) -> dict[str, str]:
     return {r[0]: (r[1] or "") for r in rows}
 
 
+# 一度に DB から読む銘柄数。
+#
+# load_quotes は「universe 全銘柄 × lookback 日」を 1 クエリで読んで銘柄ごとの
+# DataFrame dict に切り分けるので、universe が広いとピークで
+# (生の DataFrame) + (分割後の dict) の両方がメモリに乗る。NAS は空きメモリが
+# 少なく、2026-07-19 に notify が OOM kill (exit 137) されてジョブごと落ちた。
+# チャンクに割って評価済みのぶんを都度捨てれば、ピークは universe 数に依らず
+# 一定になる。銘柄ごとに独立して判定する処理なので分割しても結果は変わらない。
+# 環境変数 NOTIFY_CHUNK_SIZE で調整可 (0 で分割無効 = 従来どおり一括)。
+DEFAULT_CHUNK_SIZE = 250
+
+
 def detect(
     engine,
     codes: list[str],
@@ -345,18 +357,29 @@ def detect(
     lookback_days: int,
 ) -> list[Hit]:
     from_date = target_date - timedelta(days=lookback_days)
-    data = load_quotes(engine, codes, from_date, target_date)
-
     target_ts = pd.Timestamp(target_date)
+
+    chunk_size = int(os.environ.get("NOTIFY_CHUNK_SIZE", DEFAULT_CHUNK_SIZE))
+    if chunk_size <= 0:
+        chunk_size = len(codes) or 1
+    n_chunks = (len(codes) + chunk_size - 1) // chunk_size
+    if n_chunks > 1:
+        print(f"[notify] {len(codes)} 銘柄を {chunk_size} 件ずつ {n_chunks} 回に分けて読む")
+
     hits: list[Hit] = []
-    for code, df in data.items():
-        # 当日値が無い銘柄はスキップ (上場廃止 / 売買停止)
-        if df.empty or df.index[-1] != target_ts:
-            continue
-        for cond in conditions:
-            result = cond.evaluate(df)
-            if result is not None:
-                hits.append(Hit(code=code, condition=cond.key, detail=result))
+    for i in range(0, len(codes), chunk_size):
+        chunk = codes[i : i + chunk_size]
+        data = load_quotes(engine, chunk, from_date, target_date)
+        for code, df in data.items():
+            # 当日値が無い銘柄はスキップ (上場廃止 / 売買停止)
+            if df.empty or df.index[-1] != target_ts:
+                continue
+            for cond in conditions:
+                result = cond.evaluate(df)
+                if result is not None:
+                    hits.append(Hit(code=code, condition=cond.key, detail=result))
+        # 次のチャンクを読む前に解放 (ピークを重ねない)
+        del data
     return hits
 
 

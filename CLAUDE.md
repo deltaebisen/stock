@@ -209,7 +209,9 @@ sibling container の volume mount が成立する。
 **自動再起動の方針**:
 - Next.js は deploy のたびに `./run.sh web-rebuild` で再 build + 再起動 (production build なので fast-refresh は無く、deploy = 完全リフレッシュ)
 - 長時間バッチ (`stock-prices` 等) は実行途中なら割り込みたくないので手動 `docker restart` で対応
-- `Dockerfile` / `requirements.txt` を変えた時は手動で `./run.sh build` し直す
+- `Dockerfile` / `requirements.txt` を変えた時は手動で `./run.sh build` し直す (deploy workflow は `web-rebuild` しかしないので worker イメージは更新されない。`ModuleNotFoundError` が CI で出たらこれを疑う)
+
+python worker は `run.sh` で `--memory ${WORKER_MEMORY:-1g}` を付けて起動する。上限が無いとメモリを食い潰したときにホストの OOM killer が RSS 最大のプロセスを選ぶので、無関係なコンテナ (実際に `stock-runner`) が巻き添えになる。cgroup 上限があれば被害がジョブ 1 本に閉じる。空きメモリに応じて `WORKER_MEMORY=2g ./run.sh ...` で調整。
 
 runner は `myoung34/github-runner:latest` (ARM64) を docker save/scp/load で持ち込み、`docker.sock` と `/mnt/public/develop/stock/` をマウントして常駐させている。`setup-runner.sh` がそのセットアップを担う。
 
