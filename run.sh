@@ -14,6 +14,23 @@ IMAGE_NAME="stock-worker"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# python worker のメモリ上限。
+#
+# 上限を付けないと、メモリを食い潰したときにホストの OOM killer が「一番 RSS が
+# 大きいプロセス」を選んで殺すので、無関係なコンテナが巻き添えになる。実際に
+# 2026-07-19 の notify OOM で stock-runner が巻き込み再起動し、そこから runner が
+# 再登録ループに入って daily batch が 4 日ぶん止まった (setup-runner.sh 注 3 参照)。
+#
+# --memory を付けると cgroup が「その worker だけ」を殺すので、被害がジョブ 1 本に
+# 閉じる。GHA 側はステップが exit 137 で失敗するだけで、runner も MariaDB も無事。
+# NAS の空きメモリに応じて環境変数で調整可 (`WORKER_MEMORY=2g ./run.sh notify`)。
+# 0 / 空で無効化。カーネルが memory cgroup 非対応なら docker が警告を出して無視する。
+WORKER_MEMORY="${WORKER_MEMORY:-1g}"
+MEM_ARGS=()
+if [ -n "$WORKER_MEMORY" ] && [ "$WORKER_MEMORY" != "0" ]; then
+  MEM_ARGS=(--memory "$WORKER_MEMORY")
+fi
+
 case "${1:-}" in
   build)
     docker build -t "$IMAGE_NAME" backend/
@@ -26,6 +43,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_listed
     ;;
 
@@ -36,6 +54,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_calendar
     ;;
 
@@ -47,6 +66,7 @@ case "${1:-}" in
       -e FETCH_MODE=diff \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_calendar
     ;;
 
@@ -58,6 +78,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_edinet_codes
     ;;
 
@@ -69,6 +90,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_edinet_documents
     ;;
 
@@ -82,6 +104,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_edinet_documents
     echo ""
     echo "起動済み。ログ追跡: docker logs -f stock-edinet-docs"
@@ -98,6 +121,7 @@ case "${1:-}" in
       -e FETCH_MODE=diff \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_edinet_documents
     ;;
 
@@ -118,6 +142,7 @@ case "${1:-}" in
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
       -v stock-arelle-cache:/app/data/arelle-cache \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.parse_xbrl
     ;;
 
@@ -135,6 +160,7 @@ case "${1:-}" in
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
       -v stock-arelle-cache:/app/data/arelle-cache \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.parse_xbrl
     echo ""
     echo "起動済み。ログ追跡: docker logs -f stock-xbrl"
@@ -149,6 +175,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_prices
     ;;
 
@@ -160,6 +187,7 @@ case "${1:-}" in
       -e FETCH_MODE=diff \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_prices
     ;;
 
@@ -173,6 +201,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_prices
     echo ""
     echo "起動済み。ログ追跡: docker logs -f stock-prices"
@@ -193,6 +222,7 @@ case "${1:-}" in
       -e FETCH_TO="$2" \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.fetch_prices
     ;;
 
@@ -210,6 +240,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.backtest "$@"
     ;;
 
@@ -230,6 +261,7 @@ case "${1:-}" in
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/backend/config:/app/config" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" python -m src.notify "$@"
     ;;
 
@@ -240,6 +272,7 @@ case "${1:-}" in
       -e PYTHONUNBUFFERED=1 \
       -v "$SCRIPT_DIR/backend/src:/app/src" \
       -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
       "$IMAGE_NAME" bash
     ;;
 

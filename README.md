@@ -167,6 +167,11 @@ RUNNER_PAT=github_pat_xxxxxxxxxxxxxxxxxxxx
 短期失効する registration token (1h) ではなく PAT を使うことで、コンテナ再起動・NAS 再起動・
 GitHub 側で deregister されたケースも、起動時に自動で再登録される (毎回 token 取り直し不要)。
 
+なお runner コンテナは `CONFIGURED_ACTIONS_RUNNER_FILES_DIR` (runner reusage) を有効にして
+設定を named volume `stock-runner-config` に永続化している。これが無いと再起動のたびに
+`Cannot configure the runner because it is already configured.` で落ちて `--restart always`
+と無限ループになり、runner が offline のまま復帰しない。詳細は `setup-runner.sh` の注 3。
+
 **4. runner 起動**
 
 ```bash
