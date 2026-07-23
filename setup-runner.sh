@@ -62,8 +62,11 @@ if [ -z "${RUNNER_PAT:-}" ]; then
   exit 1
 fi
 
-# 既存 runner を入れ替え
+# 既存 runner を入れ替え。
+# 設定 volume も一緒に消して「完全に登録し直す」状態にする (下の注 3 参照)。
+# このスクリプトを叩く = クリーン再登録したい場面なので、設定の引き継ぎはしない。
 docker rm -f stock-runner 2>/dev/null || true
+docker volume rm stock-runner-config 2>/dev/null || true
 
 docker run -d \
   --name stock-runner \
@@ -74,6 +77,9 @@ docker run -d \
   -e RUNNER_WORKDIR="/tmp/runner-work" \
   -e LABELS="self-hosted,nas,arm64" \
   -e NAS_WORKSPACE="${SCRIPT_DIR}" \
+  -e CONFIGURED_ACTIONS_RUNNER_FILES_DIR="/runner-files" \
+  -e DISABLE_AUTOMATIC_DEREGISTRATION="true" \
+  -v stock-runner-config:/runner-files \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "${SCRIPT_DIR}:${SCRIPT_DIR}" \
   myoung34/github-runner:latest
@@ -91,6 +97,30 @@ docker run -d \
 # `/workspace` と認識して `docker run -v /workspace/frontend:/app` をホスト側に
 # 投げ、ホストに /workspace が無いので空マウントになり package.json が見えない。
 # NAS_WORKSPACE 環境変数を deploy.yml に渡してホスト絶対パスを参照させる。
+#
+# 注 3: CONFIGURED_ACTIONS_RUNNER_FILES_DIR (= runner reusage) は
+# **--restart always と組で必須**。これが無いと再起動のたびに死ぬ。
+#
+# myoung34/github-runner の entrypoint.sh は起動のたびに config.sh で登録処理を
+# 走らせる (= コンテナは使い捨て前提)。reusage 無効だと再起動時も再登録を試み、
+# ここで config.sh が
+#   Cannot configure the runner because it is already configured.
+#   An error occurred: Value cannot be null. (Parameter 'configuredSettings')
+# を出して即 exit → --restart always が再起動 → 同じエラー、の無限ループに入る。
+# 一度でも再起動したら二度と復帰せず、GitHub 側では runner が offline のまま
+# scheduled workflow が queued で溜まり続け、24h でタイムアウト cancel される。
+# (2026-07 に実際に発生。notify の OOM でコンテナが巻き込み再起動したのが発端で、
+#  4 日ぶん daily batch が全部 cancelled になった)
+#
+# reusage を有効にすると entrypoint は設定を /runner-files (named volume) に
+# 退避し、次回起動時はコピーして戻したうえで
+#   if [ -f "/actions-runner/.runner" ]; then echo "The runner has already been configured"
+# と **config.sh を丸ごとスキップ**して listener だけ起動する。これで再起動に耐える。
+#
+# DISABLE_AUTOMATIC_DEREGISTRATION=true は reusage と同時に必須。false のままだと
+# entrypoint が「deregister 済み runner を再利用すると壊れる」として exit 1 する。
+# 停止時に GitHub から deregister しなくなるので runner 一覧には残り続けるが、
+# persistent runner ではむしろそれが正しい。
 
 echo ""
 echo "Runner 起動済み。確認:"
