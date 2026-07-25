@@ -219,6 +219,8 @@ runner は `myoung34/github-runner:latest` (ARM64) を docker save/scp/load で�
 
 **runner reusage (`CONFIGURED_ACTIONS_RUNNER_FILES_DIR=/runner-files` + named volume `stock-runner-config` + `DISABLE_AUTOMATIC_DEREGISTRATION=true`) は `--restart always` と組で必須**。myoung34/github-runner の entrypoint は起動のたびに `config.sh` を走らせる (コンテナ使い捨て前提) ので、reusage 無効だと再起動時に `Cannot configure the runner because it is already configured.` → `Value cannot be null. (Parameter 'configuredSettings')` で即 exit → restart policy が再起動、の無限ループに入り二度と復帰しない。この状態になると GitHub 側で runner が offline のまま scheduled workflow が queued で溜まり、24h でタイムアウト cancel される (2026-07 に 4 日ぶん daily batch を落とした)。**runner が offline で復帰しないときは、まず `docker logs stock-runner` でこのループになっていないか見る**。当座の復旧は `setup-runner.sh` を叩き直す (コンテナと設定 volume を作り直すので fresh に再登録される)。
 
+なお reusage 有効化の副作用で、**再起動直後は 1〜2 分 offline に見える**(自動 deregister を切ったため GitHub 側の旧セッションが残り、`A session for this runner already exists` / `Runner connect error: Error: Conflict. Retrying until reconnected` を出しながらリトライする)。2026-07-23 の実測で復帰まで 80 秒。これは正常なので放置してよい。上記の無限ループとはログのメッセージで見分ける。
+
 PAT は CLI 引数ではなく **`.env` の `RUNNER_PAT` から読む** (`setup-runner.sh` 内で `source .env`)。`.env` は gitignore 済 & CI rsync 除外で NAS local 保持なので、bash history や `docker inspect stock-runner` への漏出を避けられる。GitHub Actions secrets は runner 自身を起動する場面では使えない (runner が無いと workflow が走らないため chicken-and-egg)。
 
 ## NAS 環境の制約
