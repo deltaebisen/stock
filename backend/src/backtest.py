@@ -566,10 +566,19 @@ def run(config: BacktestConfig) -> int:
 
         # シグナル生成
         strategy = make_strategy(config.strategy, config.params)
+        # 立ち上がり区間は捨てる。osgf は Pine の nz() 準拠で先頭バーも「値が出る」
+        # (履歴不足ぶんを 0 で埋めた歪んだ値) ため、NaN 任せだと偽シグナルが出る。
+        warmup = strategy.required_warmup()
         signals: dict[str, pd.Series] = {}
         for code, df in data.items():
-            signals[code] = strategy.generate_signals(df)
-        print(f"[backtest] signals generated for {len(signals)} 銘柄")
+            sig = strategy.generate_signals(df)
+            if warmup > 0:
+                sig.iloc[:warmup] = 0
+            signals[code] = sig
+        print(
+            f"[backtest] signals generated for {len(signals)} 銘柄 "
+            f"(先頭 {warmup} バーは warmup として無視)"
+        )
 
         # event-driven 実行
         trades, equity_curve = run_backtest(config, data, signals)
