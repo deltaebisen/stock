@@ -212,7 +212,9 @@ sibling container の volume mount が成立する。
 - 長時間バッチ (`stock-prices` 等) は実行途中なら割り込みたくないので手動 `docker restart` で対応
 - `Dockerfile` / `requirements.txt` を変えた時は手動で `./run.sh build` し直す (deploy workflow は `web-rebuild` しかしないので worker イメージは更新されない。`ModuleNotFoundError` が CI で出たらこれを疑う)
 
-python worker は `run.sh` で `--memory ${WORKER_MEMORY:-1g}` を付けて起動する。上限が無いとメモリを食い潰したときにホストの OOM killer が RSS 最大のプロセスを選ぶので、無関係なコンテナ (実際に `stock-runner`) が巻き添えになる。cgroup 上限があれば被害がジョブ 1 本に閉じる。空きメモリに応じて `WORKER_MEMORY=2g ./run.sh ...` で調整。
+python worker は `run.sh` で `--memory ${WORKER_MEMORY:-512m} --memory-swap ${WORKER_MEMORY_SWAP:-1500m}` を付けて起動する。上限が無いとメモリを食い潰したときにホストの OOM killer が RSS 最大のプロセスを選ぶので、無関係なコンテナ (実際に `stock-runner`) が巻き添えになる。cgroup 上限があれば被害がジョブ 1 本に閉じる。
+
+**上限値は総 RAM 960MiB より小さくないと機能しない**。当初 `1g` にしていたが総 RAM より大きく、cgroup に到達する前にホストが枯れるので「上限なし」と同義だった (2026-07-24/25 の EDINET daily が 2 日連続 exit 137)。arelle は doc 1 件 parse で 250MB 前後まで伸びる実測なので 512m。`--memory-swap` は「メモリ + swap の合計上限」で、ピークを swap (1.9GB ある) に逃がして「遅くなるが死なない」に倒すためのもの。調整は `WORKER_MEMORY=700m ./run.sh ...`。
 
 runner は `myoung34/github-runner:latest` (ARM64) を docker save/scp/load で持ち込み、`docker.sock` と `/mnt/public/develop/stock/` をマウントして常駐させている。`setup-runner.sh` がそのセットアップを担う。
 
@@ -233,6 +235,7 @@ PAT は CLI 引数ではなく **`.env` の `RUNNER_PAT` から読む** (`setup-
 - **Docker image を NAS で pull できない** → Windows で `docker pull` → `docker save | gzip` → `scp` → NAS で `docker load` (scp 先は `~/`、`/mnt/public/develop/stock/` は CI 由来の uid で書き込み不可)。持ち込むイメージは現状 `myoung34/github-runner` (CI runner) と `node:22-bookworm-slim` (Next.js ランタイム) の 2 つ
 - **Next.js は alpine ではなく debian 系を使う** (`node:22-bookworm-slim`)。`node:22-alpine` (musl-arm64) では SWC の prebuilt native binary が SIGBUS で死んで `next build` が完走しない。glibc-arm64 の prebuilt は安定実績ありなので debian に倒している
 - システムに git/rsync/その他のツールがほぼ無い → 必要なら image 内で完結させる (runner image が git/rsync を内包しているのを利用)
+- **RAM は総量 960MiB しかない** (`docker info` の Total Memory / swap 1.9GB)。常駐だけで MariaDB + `stock-web` + `stock-runner` が乗り、空きは数百 MB。「メモリ上限を 1g にしておけば安全」のような **総 RAM を超える設定は無意味** (詳細は上の worker メモリの項)。重いバッチ (`xbrl`, `notify`, `prices`) は必ず swap 逃がし付きの cgroup 上限で走らせる
 
 `network_mode: host` は LAN 内 MariaDB に繋ぐためで、SMB 経由のホスト I/O も同じネットワークスタックを通る。
 

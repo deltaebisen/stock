@@ -23,12 +23,28 @@ cd "$SCRIPT_DIR"
 #
 # --memory を付けると cgroup が「その worker だけ」を殺すので、被害がジョブ 1 本に
 # 閉じる。GHA 側はステップが exit 137 で失敗するだけで、runner も MariaDB も無事。
-# NAS の空きメモリに応じて環境変数で調整可 (`WORKER_MEMORY=2g ./run.sh notify`)。
-# 0 / 空で無効化。カーネルが memory cgroup 非対応なら docker が警告を出して無視する。
-WORKER_MEMORY="${WORKER_MEMORY:-1g}"
+#
+# **上限は NAS の総 RAM (960MiB) より小さくないと意味が無い**。当初 1g にしていたが
+# それは総 RAM より大きく、cgroup には一生到達しないまま先にホストが枯れる (=
+# OOM killer が動く元の世界のまま) だった。実際 2026-07-24/25 の EDINET daily は
+# これで 2 日連続 exit 137。arelle は doc 1 件 parse するのに 250MB 前後まで伸びる
+# 実測なので、512m なら通常は収まり、外れ値は下の swap 側に逃げる。
+#
+# --memory-swap は「メモリ + swap の合計上限」。--memory だけ指定すると既定で
+# メモリの 2 倍になる。NAS には swap が 1.9GB あるので明示的に広めに取り、ピークを
+# swap に逃がして「遅くなるが死なない」に倒している (バッチなので遅延は許容)。
+#
+# NAS の空きメモリに応じて環境変数で調整可 (`WORKER_MEMORY=700m ./run.sh notify`)。
+# WORKER_MEMORY=0 / 空で無効化 (= 上限なし。ホスト全体を巻き込むので非推奨)。
+# カーネルが memory cgroup 非対応なら docker が警告を出して無視する。
+WORKER_MEMORY="${WORKER_MEMORY:-512m}"
+WORKER_MEMORY_SWAP="${WORKER_MEMORY_SWAP:-1500m}"
 MEM_ARGS=()
 if [ -n "$WORKER_MEMORY" ] && [ "$WORKER_MEMORY" != "0" ]; then
   MEM_ARGS=(--memory "$WORKER_MEMORY")
+  if [ -n "$WORKER_MEMORY_SWAP" ] && [ "$WORKER_MEMORY_SWAP" != "0" ]; then
+    MEM_ARGS+=(--memory-swap "$WORKER_MEMORY_SWAP")
+  fi
 fi
 
 case "${1:-}" in
