@@ -155,6 +155,7 @@ EDINET API v2 は **API キーをクエリパラメータ `Subscription-Key` で
 - 売買単位 100 株等の制約は無視 (1 株単位)
 - 手数料は `commission_bps` 片道で近似 (default 10bps = 0.1%)、スリッページもこれに吸収
 - universe を `all` (~4000 銘柄) にすると一括クエリで数 GB DataFrame になるので scale_category や explicit codes での絞り込み推奨
+- ロード期間の先頭 `strategy.required_warmup()` バーはシグナルを 0 に潰す (指標の立ち上がり区間)。`osgf` は Pine の `nz()` 準拠で先頭バーにも「値が出る」ため NaN 任せにできない。200MA フィルタ有効時は 201 バー = 約 10 ヶ月ぶん entry が出ないので、`--from` はその余裕を見て指定する
 
 **戦略追加方法**: `backtest_strategies.py` に `Strategy` サブクラスを書いて `STRATEGIES` と `DEFAULT_PARAMS` 辞書に登録。`generate_signals(df) -> Series` が +1/-1/0 を返す。
 

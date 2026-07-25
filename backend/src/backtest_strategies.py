@@ -244,20 +244,36 @@ def _osgf_weights(smthper: int) -> list[float]:
 
 
 def _osgf_gaussian_ma(src: pd.Series, smthper: int) -> pd.Series:
-    """Pine の _smthMA: 直近 smthper+1 本の fib-gaussian 加重平均 (out1)。"""
+    """Pine の _smthMA: 直近 smthper+1 本の fib-gaussian 加重平均 (out1)。
+
+    Pine は `nz(src[i])` なので **履歴が足りないバーは 0 として加算し、bar 0 から値を出す**
+    (先頭 smthper 本は重みの一部しか乗らない歪んだ値になるが、原文どおり)。
+    NaN 伝播で先頭を欠損にすると 2-pole smoother の bar_index が Pine とずれるので、
+    ここでは fillna(0) で原文に合わせている。歪んだ先頭区間は
+    `required_warmup()` (呼び出し側) で捨てる前提。
+    """
     weights = _osgf_weights(smthper)
     src = src.astype(float)
     out = pd.Series(0.0, index=src.index)
     for i, w in enumerate(weights):
-        out = out + w * src.shift(i)
+        out = out + w * src.shift(i).fillna(0.0)  # Pine: nz(src[i])
     return out
 
 
 def _wilder_atr(df: pd.DataFrame, period: int) -> pd.Series:
     """Pine の ta.atr(period) 相当。True Range の Wilder RMA (alpha=1/period)。
 
-    TR = max(H-L, |H-C[1]|, |L-C[1]|)。初日は前日 close が無いので TR = H-L。
-    RMA は既存戦略 (RSI の Wilder smoothing) と同じく ewm(alpha=1/period) で近似。
+    TR = max(H-L, |H-C[1]|, |L-C[1]|)。初日は前日 close が無いので TR = H-L
+    (Pine の `ta.tr(true)`)。
+
+    平滑化は Pine の `ta.rma` をそのまま再現する:
+        sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1 - alpha) * sum[1]
+    すなわち **period 本目までは値を出さず、period 本目で TR の単純平均をシードにして**
+    以降 alpha=1/period の漸化式を回す。pandas の
+    `ewm(alpha=1/period, adjust=False, min_periods=period)` は再帰を bar 0 から始めて
+    TR[0] をシードにする (min_periods は先頭の出力を隠すだけ) ので、Pine と初期値が
+    ずれる。period=21 だと 21 本目で当日 TR の重みが 4.76% (Pine) vs 100% 近く (ewm)
+    と大きく違い、差が消えるまで数百バーかかるため、明示ループに置き換えている。
     """
     high = df["high"].astype(float) if "high" in df.columns else df["close"].astype(float)
     low = df["low"].astype(float) if "low" in df.columns else df["close"].astype(float)
@@ -268,15 +284,28 @@ def _wilder_atr(df: pd.DataFrame, period: int) -> pd.Series:
         axis=1,
     ).max(axis=1)
     tr.iloc[0] = float(high.iloc[0] - low.iloc[0])  # 初日は H-L
-    return tr.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+    values = tr.to_numpy(dtype=float)
+    out = np.full(len(values), np.nan)
+    if len(values) >= period > 0:
+        alpha = 1.0 / period
+        prev = float(np.mean(values[:period]))  # ta.sma シード
+        out[period - 1] = prev
+        for t in range(period, len(values)):
+            prev = alpha * values[t] + (1 - alpha) * prev
+            out[t] = prev
+    return pd.Series(out, index=df.index)
 
 
 def _two_pole_super_smoother(src: pd.Series, period: int) -> pd.Series:
     """Ehlers 2-pole super smoother (Pine の _twopoless)。
 
     再帰フィルタなので逐次計算する。先頭 3 本 (bar_index < 3) は src をそのまま入れ、
-    NaN の filt[1]/filt[2] は nz() 相当で 0 扱い。out1 先頭の NaN (加重平均の
-    warmup 不足分) は入力からスキップし、有効データの通し番号で bar_index を数える。
+    NaN の filt[1]/filt[2] は nz() 相当で 0 扱い。
+
+    bar_index は「有効データの通し番号」で数える。`_osgf_gaussian_ma` が Pine の nz()
+    に合わせて bar 0 から値を出すようになったので、通常の入力ではこの通し番号が Pine の
+    bar_index と一致する (NaN スキップは価格自体が欠損しているときの保険)。
     """
     a1 = math.exp(-1.414 * math.pi / period)
     b1 = 2 * a1 * math.cos(1.414 * math.pi / period)
