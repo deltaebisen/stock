@@ -27,7 +27,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -62,8 +62,89 @@ class BacktestConfig:
 # -------------------------------------------------------------------
 
 
-def resolve_universe(engine, spec: str) -> list[str]:
+def _resolve_screen_universe(engine, spec_body: str, as_of: date) -> list[str]:
+    """`screen:` spec を解決する (osgf_rule.md のスクリーニング条件と同じ形)。
+
+    `screen:market=プライム,min_turnover=1000000000,max_price=4000,days=20`
+    (キーは全て省略可。省略時は上記が既定値 = notify.json の実運用値)
+
+    - market      : listed_info の market_code 完全一致 or market_name 前方一致
+    - min_turnover: 直近 days 営業日の AVG(turnover_value) 下限 (円)
+    - max_price   : as_of 時点の直近 adjustment_close 上限 (円)
+    - days        : 平均売買代金の対象営業日数
+
+    **判定は as_of (バックテスト開始日) 時点で 1 回だけ**行い、以降は universe を固定する。
+    先読みを避けるため to_date ではなく from_date で評価している (期中に条件を満たさ
+    なくなった銘柄も残るし、期中に満たすようになった銘柄は入らない)。
+    """
+    market: str | None = "プライム"
+    min_turnover: float | None = 1_000_000_000.0
+    max_price: float | None = 4000.0
+    days = 20
+
+    for kv in spec_body.split(","):
+        kv = kv.strip()
+        if not kv:
+            continue
+        if "=" not in kv:
+            raise ValueError(f"screen spec の項目は k=v 形式: {kv!r}")
+        k, v = (x.strip() for x in kv.split("=", 1))
+        if k == "market":
+            market = v or None
+        elif k == "min_turnover":
+            min_turnover = float(v) if v else None
+        elif k == "max_price":
+            max_price = float(v) if v else None
+        elif k == "days":
+            days = int(v)
+        else:
+            raise ValueError(f"unknown screen key: {k!r}")
+
+    params: dict[str, Any] = {
+        "as_of": as_of,
+        "from_date": as_of - timedelta(days=int(days * 1.5)),
+    }
+    where = ["1=1"]
+    if market:
+        where.append("(l.market_code = :mkt OR l.market_name LIKE CONCAT(:mkt, '%'))")
+        params["mkt"] = market
+
+    cond = []
+    if min_turnover is not None:
+        cond.append("t.avg_turnover >= :min_turnover")
+        params["min_turnover"] = min_turnover
+    if max_price is not None:
+        cond.append("t.last_close <= :max_price")
+        params["max_price"] = max_price
+
+    # 窓関数で「期間平均売買代金」と「as_of 直近の終値」を 1 パスで出す。
+    # as_of が非営業日でも、その日以前で最後に値がある日を採用する。
+    sql = (
+        "SELECT t.code FROM ("
+        "  SELECT q.code AS code,"
+        "         AVG(q.turnover_value) OVER (PARTITION BY q.code) AS avg_turnover,"
+        "         q.adjustment_close AS last_close,"
+        "         ROW_NUMBER() OVER (PARTITION BY q.code ORDER BY q.trade_date DESC) AS rn"
+        "    FROM daily_quotes q"
+        "    JOIN listed_info l ON l.code = q.code"
+        f"   WHERE {' AND '.join(where)}"
+        "     AND q.trade_date BETWEEN :from_date AND :as_of"
+        "     AND q.adjustment_close IS NOT NULL"
+        ") t WHERE t.rn = 1"
+        + ("".join(f" AND {c}" for c in cond))
+        + " ORDER BY t.code"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [r[0] for r in rows]
+
+
+def resolve_universe(engine, spec: str, as_of: date | None = None) -> list[str]:
     spec = spec.strip()
+    if spec.startswith("screen:"):
+        if as_of is None:
+            raise ValueError("screen: spec には as_of (from_date) が必要")
+        return _resolve_screen_universe(engine, spec[len("screen:") :], as_of)
     if spec == "all":
         sql = "SELECT code FROM listed_info ORDER BY code"
         with engine.connect() as conn:
@@ -84,7 +165,8 @@ def resolve_universe(engine, spec: str) -> list[str]:
         return [spec[len("single:") :].strip()]
     raise ValueError(
         f"unknown universe spec: {spec!r}. "
-        f"use 'all' / 'scale:<name>' / 'codes:7203,9984,...' / 'single:7203'"
+        f"use 'all' / 'scale:<name>' / 'codes:7203,9984,...' / 'single:7203' / "
+        f"'screen:market=プライム,min_turnover=1000000000,max_price=4000,days=20'"
     )
 
 
@@ -180,6 +262,7 @@ def run_backtest(
     config: BacktestConfig,
     data: dict[str, pd.DataFrame],
     signals: dict[str, pd.Series],
+    plans: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[list[ClosedTrade], list[EquityPoint]]:
     """データとシグナル所与で event-driven バックテストを走らせる。
 
@@ -188,7 +271,24 @@ def run_backtest(
       2. 既存ポジションへの sell signal を処理 (現金化)
       3. 新規 buy signal を等額配分で entry
       4. equity 記録
+
+    `plans` は `Strategy.execution_plan()` の戻り (code → price/reason の DataFrame)。
+    逆指値 / 指値のようにバー内の特定価格で約定する戦略のために、close の代わりに
+    使う約定価格と exit 理由をエンジンに渡す。None または NaN の日は close 約定。
     """
+    plans = plans or {}
+
+    def _exec(code: str, d: pd.Timestamp, fallback: float) -> tuple[float, str]:
+        """(約定価格, exit 理由ラベル) を返す。plan が無ければ close 約定・理由は signal。"""
+        plan = plans.get(code)
+        if plan is None or d not in plan.index:
+            return fallback, "signal"
+        price = plan.at[d, "price"]
+        reason = str(plan.at[d, "reason"] or "")
+        if price is None or pd.isna(price) or float(price) <= 0:
+            return fallback, reason or "signal"
+        return float(price), reason or "signal"
+
     initial_capital = float(config.initial_capital)
     bps = float(config.commission_bps) / 10000.0  # 片道 (0.001 = 0.1%)
 
@@ -215,7 +315,7 @@ def run_backtest(
             df = data[code]
             if d not in df.index:
                 continue
-            exit_price = float(df.loc[d, "close"])
+            exit_price, exit_reason = _exec(code, d, float(df.loc[d, "close"]))
             pos = positions[code]
             gross = pos.shares * exit_price
             exit_commission = gross * bps
@@ -236,7 +336,7 @@ def run_backtest(
                     commission=commission_total,
                     pnl=pnl,
                     pnl_pct=pnl_pct,
-                    exit_reason="signal",
+                    exit_reason=exit_reason,
                 )
             )
             del positions[code]
@@ -253,7 +353,7 @@ def run_backtest(
             df = data[code]
             if d not in df.index:
                 continue
-            price = float(df.loc[d, "close"])
+            price, _reason = _exec(code, d, float(df.loc[d, "close"]))
             if price <= 0:
                 continue
             entries_today.append((code, price))
@@ -540,7 +640,7 @@ def run(config: BacktestConfig) -> int:
     engine = get_engine()
 
     # universe 解決
-    codes = resolve_universe(engine, config.universe_spec)
+    codes = resolve_universe(engine, config.universe_spec, as_of=config.from_date)
     if not codes:
         raise RuntimeError(f"universe spec '{config.universe_spec}' で 0 銘柄")
     config.universe_codes = codes
@@ -570,18 +670,24 @@ def run(config: BacktestConfig) -> int:
         # (履歴不足ぶんを 0 で埋めた歪んだ値) ため、NaN 任せだと偽シグナルが出る。
         warmup = strategy.required_warmup()
         signals: dict[str, pd.Series] = {}
+        plans: dict[str, pd.DataFrame] = {}
         for code, df in data.items():
             sig = strategy.generate_signals(df)
             if warmup > 0:
                 sig.iloc[:warmup] = 0
             signals[code] = sig
+            plan = strategy.execution_plan(df)
+            if plan is not None:
+                plans[code] = plan
         print(
             f"[backtest] signals generated for {len(signals)} 銘柄 "
-            f"(先頭 {warmup} バーは warmup として無視)"
+            f"(先頭 {warmup} バーは warmup として無視"
+            + (f" / 約定価格 plan あり" if plans else "")
+            + ")"
         )
 
         # event-driven 実行
-        trades, equity_curve = run_backtest(config, data, signals)
+        trades, equity_curve = run_backtest(config, data, signals, plans or None)
         print(
             f"[backtest] simulation done: {len(trades)} trades, "
             f"{len(equity_curve)} equity points"
@@ -668,7 +774,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--universe",
         required=True,
-        help="universe spec。'all' / 'scale:TOPIX Large 70' / 'codes:7203,9984' / 'single:1301'",
+        help=(
+            "universe spec。'all' / 'scale:TOPIX Large 70' / 'codes:7203,9984' / "
+            "'single:1301' / 'screen:market=プライム,min_turnover=1000000000,"
+            "max_price=4000,days=20' (screen は --from 時点で 1 回だけ判定)"
+        ),
     )
     p.add_argument("--from", dest="from_date", required=True, help="YYYY-MM-DD")
     p.add_argument("--to", dest="to_date", required=True, help="YYYY-MM-DD")

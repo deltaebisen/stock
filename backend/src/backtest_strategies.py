@@ -43,6 +43,19 @@ class Strategy(ABC):
         """シグナルが安定するまでのバー数 (バックテスト開始から無視する日数)。"""
         return 0
 
+    def execution_plan(self, df: pd.DataFrame) -> pd.DataFrame | None:
+        """signal 日の約定価格を close 以外にしたい戦略だけ実装する。
+
+        Returns: index が df と同じで以下 2 列を持つ DataFrame、または None (= 全部 close 約定)
+          price  : その日の約定価格。NaN なら close にフォールバック
+          reason : exit 理由のラベル (`stop` / `take_profit` など)。空文字なら既定 (`signal`)
+
+        逆指値 / 指値のようにバー内の特定価格で約定する戦略のためのフック。
+        エンジンは signal の +1/-1 に対してこの価格を使うだけで、ポジション管理
+        (資金配分・保有状態) は従来どおりエンジン側が持つ。
+        """
+        return None
+
 
 # -------------------------------------------------------------------
 # 個別戦略
@@ -410,6 +423,140 @@ class OneSidedGaussianFilterStrategy(Strategy):
         return base
 
 
+class OsgfSwingStrategy(OneSidedGaussianFilterStrategy):
+    """`temp/osgf_rule.md` のスイングルールをそのまま回す戦略。
+
+    エントリー:
+      1. OSGF のロングシグナル点灯 (out の上向き転換 + 200MA 上向き) で「待機」に入る
+      2. 待機中に安値が OSGF ライン (out) にタッチしたバーで、そのライン価格で買う
+         (寄り付きが既にラインより下ならギャップとみなして寄り値で約定)
+
+    SL:
+      1. エントリー時の `out - ATR*sl_mult` に逆指値 (以後は固定)
+      2. 終値が `out + ATR*be_mult` を上抜けたら、逆指値をエントリー値 (建値) に引き上げ
+
+    TP:
+      - 毎日 `out + ATR*tp_mult` に更新する指値
+
+    ルールに書かれていない部分の解釈 (すべて params で変更可):
+      - 点灯当日はエントリーしない (「1 のあとに」を素直に読んで翌バー以降のタッチを待つ)
+      - 待機中に下向き転換 (sell シグナル) が出たら待機を取り消す
+      - 決済は SL / TP のみ。保有中に下向き転換が出ても手仕舞わない
+      - 同一バーで SL と TP の両方に触れた場合は SL を優先 (悲観側)
+      - エントリーしたバーでは SL/TP 判定をしない (翌バーから)
+
+    params (osgf のものに加えて):
+      sl_mult : 逆指値の ATR 乗数 (default 1.0)
+      tp_mult : 指値の ATR 乗数 (default 2.5)
+      be_mult : 建値移動のトリガーとなる上側ラインの ATR 乗数 (default 1.0)
+
+    注意: この戦略はエンジンと独立に「約定した前提」で状態遷移するので、資金不足で
+    エンジンがエントリーを見送ると以降の SL/TP シグナルが空振りする (エンジン側は
+    ポジションが無い -1 を無視するだけなので破綻はしない)。
+    """
+
+    name = "osgf_swing"
+
+    def _build_plan(self, df: pd.DataFrame) -> pd.DataFrame:
+        cached = getattr(self, "_plan_cache", None)
+        if cached is not None and cached[0] is df:
+            return cached[1]
+
+        out = self._osgf_line(df)
+        atr = _wilder_atr(df, int(self.params["atrper"]))
+        base = super().generate_signals(df)  # +1 = 点灯 / -1 = 下向き転換
+
+        open_ = df["open"].astype(float) if "open" in df.columns else df["close"].astype(float)
+        high = df["high"].astype(float) if "high" in df.columns else df["close"].astype(float)
+        low = df["low"].astype(float) if "low" in df.columns else df["close"].astype(float)
+        close = df["close"].astype(float)
+
+        sl_mult = float(self.params["sl_mult"])
+        tp_mult = float(self.params["tp_mult"])
+        be_mult = float(self.params["be_mult"])
+
+        n = len(df)
+        signal = np.zeros(n, dtype=int)
+        price = np.full(n, np.nan)
+        reason = [""] * n
+
+        start = self.required_warmup()  # 立ち上がり区間は状態遷移させない
+        armed = False
+        in_pos = False
+        entry = stop = tp = math.nan
+        be_done = False
+
+        for t in range(start, n):
+            o, h, l, c = (
+                float(open_.iloc[t]),
+                float(high.iloc[t]),
+                float(low.iloc[t]),
+                float(close.iloc[t]),
+            )
+            line = float(out.iloc[t])
+            a = float(atr.iloc[t])
+            valid = not (math.isnan(line) or math.isnan(a))
+
+            if in_pos:
+                exit_px: float | None = None
+                why = ""
+                if l <= stop:
+                    # ギャップダウンで寄り付きが既に逆指値以下ならその値段で約定
+                    exit_px = min(o, stop)
+                    why = "stop"
+                elif h >= tp:
+                    exit_px = max(o, tp)
+                    why = "take_profit"
+
+                if exit_px is not None:
+                    signal[t] = -1
+                    price[t] = exit_px
+                    reason[t] = why
+                    in_pos = False
+                    armed = False
+                    continue
+
+                if valid:
+                    tp = line + a * tp_mult  # TP は毎日更新
+                    if not be_done and c > line + a * be_mult:
+                        stop = entry  # 建値に引き上げ
+                        be_done = True
+                continue
+
+            # ノーポジ
+            if base.iloc[t] == -1:
+                armed = False
+
+            if armed and valid and l <= line:
+                fill = min(o, line)
+                if fill > 0:
+                    signal[t] = 1
+                    price[t] = fill
+                    reason[t] = "touch"
+                    in_pos = True
+                    entry = fill
+                    stop = line - a * sl_mult
+                    tp = line + a * tp_mult
+                    be_done = False
+                    armed = False
+                    continue
+
+            if base.iloc[t] == 1:
+                armed = True  # 点灯当日は買わず、翌バー以降のタッチを待つ
+
+        plan = pd.DataFrame(
+            {"signal": signal, "price": price, "reason": reason}, index=df.index
+        )
+        self._plan_cache = (df, plan)
+        return plan
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        return self._build_plan(df)["signal"].astype(int)
+
+    def execution_plan(self, df: pd.DataFrame) -> pd.DataFrame | None:
+        return self._build_plan(df)[["price", "reason"]]
+
+
 # -------------------------------------------------------------------
 # Registry
 # -------------------------------------------------------------------
@@ -428,6 +575,21 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "trend_slope": 1,
         "trend_filter": True,
     },
+    # notify.json の実運用値 (smthper=21 / extrasmthper=15) + osgf_rule.md の
+    # SL/TP 乗数。mult は可視化用チャンネルなので tp_mult と揃えてある
+    "osgf_swing": {
+        "smthper": 21,
+        "extrasmthper": 15,
+        "atrper": 21,
+        "mult": 2.5,
+        "srcoption": "close",
+        "trend_ma": 200,
+        "trend_slope": 1,
+        "trend_filter": True,
+        "sl_mult": 1.0,
+        "tp_mult": 2.5,
+        "be_mult": 1.0,
+    },
 }
 
 STRATEGIES: dict[str, type[Strategy]] = {
@@ -435,6 +597,7 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "rsi_mean_reversion": RsiMeanReversionStrategy,
     "macd_cross": MacdCrossStrategy,
     "osgf": OneSidedGaussianFilterStrategy,
+    "osgf_swing": OsgfSwingStrategy,
 }
 
 

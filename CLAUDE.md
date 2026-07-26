@@ -158,13 +158,16 @@ EDINET API v2 は **API キーをクエリパラメータ `Subscription-Key` で
 - universe を `all` (~4000 銘柄) にすると一括クエリで数 GB DataFrame になるので scale_category や explicit codes での絞り込み推奨
 - ロード期間の先頭 `strategy.required_warmup()` バーはシグナルを 0 に潰す (指標の立ち上がり区間)。`osgf` は Pine の `nz()` 準拠で先頭バーにも「値が出る」ため NaN 任せにできない。200MA フィルタ有効時は 201 バー = 約 10 ヶ月ぶん entry が出ないので、`--from` はその余裕を見て指定する
 
-**戦略追加方法**: `backtest_strategies.py` に `Strategy` サブクラスを書いて `STRATEGIES` と `DEFAULT_PARAMS` 辞書に登録。`generate_signals(df) -> Series` が +1/-1/0 を返す。
+**戦略追加方法**: `backtest_strategies.py` に `Strategy` サブクラスを書いて `STRATEGIES` と `DEFAULT_PARAMS` 辞書に登録。`generate_signals(df) -> Series` が +1/-1/0 を返す。close 以外の価格で約定させたい戦略 (逆指値 / 指値) は `execution_plan(df) -> DataFrame(price, reason)` も実装する。エンジンはシグナル日にその価格を使い、`reason` を `backtest_trades.exit_reason` に入れる。
+
+`osgf_swing` は `temp/osgf_rule.md` のスイングルール (点灯 → OSGF ライン touch でエントリー、SL = `out - ATR*1.0` + 建値移動、TP = `out + ATR*2.5` 日次更新) をこの仕組みで実装したもの。
 
 **universe_spec**:
 - `all` — listed_info 全銘柄
 - `scale:TOPIX Large 70` — scale_category 完全一致
 - `codes:7203,9984,1301` — explicit list
 - `single:1301` — 1 銘柄ショートカット
+- `screen:market=プライム,min_turnover=1000000000,max_price=4000,days=20` — notify と同じスクリーニング条件で絞る (各キー省略可 = この既定値)。判定は `--from` 時点で 1 回だけ行い universe を固定する (先読み回避のため `--to` では評価しない)
 
 **結果の見方** (DB 直叩き例):
 ```sql
