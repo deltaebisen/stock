@@ -31,6 +31,11 @@ jobs:
         #  積み残しが 4,500 件 = 約 7〜13 時間ぶんまで膨らんだ)
         # 上限に当たっても parsed_at ベースで自然に翌日へ繰り越されるだけ。
         # 大量の積み残しを一気に消化したいときは NAS で `./run.sh xbrl-bg` を使う。
+        #
+        # `xbrl` ではなく `xbrl-daily` を叩くのは、attached な docker run だと
+        # NAS のメモリ逼迫時に docker クライアント側が殺されて、コンテナは完走して
+        # いるのにステップだけ exit 137 で失敗する事故が起きるため (run.sh の
+        # xbrl-daily のコメント参照)。xbrl-daily は detached + ポーリング待ち。
         env:
           LIMIT: '300'
-        run: bash "$NAS_WORKSPACE/run.sh" xbrl
+        run: bash "$NAS_WORKSPACE/run.sh" xbrl-daily

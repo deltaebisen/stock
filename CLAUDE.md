@@ -30,6 +30,7 @@ ARM64 NAS (TerraMaster TNAS-B4AF, busybox ベース) で Docker コンテナ群�
 ./run.sh edinet-docs-diff   # EDINET 提出書類メタ差分取得
 ./run.sh xbrl               # 未 parse な edinet_documents の XBRL を financial_facts に展開 (前景)
 ./run.sh xbrl-bg            # 同 (デタッチ / 長時間)
+./run.sh xbrl-daily         # 同 (detached + ポーリング待ち / CI 専用。下記「CI の嘘の失敗」参照)
 ./run.sh prices             # 日足フル取得 (前景)
 ./run.sh prices-bg          # 日足フル取得 (デタッチ / SSH切断耐性)
 ./run.sh prices-diff        # 日足差分取得 (DB の最新日付以降のみ)
@@ -213,6 +214,8 @@ sibling container の volume mount が成立する。
 - `Dockerfile` / `requirements.txt` を変えた時は手動で `./run.sh build` し直す (deploy workflow は `web-rebuild` しかしないので worker イメージは更新されない。`ModuleNotFoundError` が CI で出たらこれを疑う)
 
 python worker は `run.sh` で `--memory ${WORKER_MEMORY:-512m} --memory-swap ${WORKER_MEMORY_SWAP:-1500m}` を付けて起動する。上限が無いとメモリを食い潰したときにホストの OOM killer が RSS 最大のプロセスを選ぶので、無関係なコンテナ (実際に `stock-runner`) が巻き添えになる。cgroup 上限があれば被害がジョブ 1 本に閉じる。
+
+**CI の「嘘の失敗」に注意**: メモリ逼迫時に殺されるのは worker コンテナとは限らず、**`docker run` のクライアント側**のことがある。クライアントが死んでもコンテナは daemon 配下で走り続けるので、**GHA のステップだけ exit 137 で失敗し、実際のジョブは完走している**という状態になる (2026-07-26 の EDINET daily は CI が 137 を返した 17 分後に 56 件を parse し終えて `fetch_log` に success を残していた)。**exit 137 を見たらまず `fetch_log` と `parsed_at` を見て、本当に仕事が止まったのか確認する**。CI から叩く長時間ジョブは `xbrl-daily` のように detached + ポーリング待ちにしてこの依存を切る。
 
 **上限値は総 RAM 960MiB より小さくないと機能しない**。当初 `1g` にしていたが総 RAM より大きく、cgroup に到達する前にホストが枯れるので「上限なし」と同義だった (2026-07-24/25 の EDINET daily が 2 日連続 exit 137)。arelle は doc 1 件 parse で 250MB 前後まで伸びる実測なので 512m。`--memory-swap` は「メモリ + swap の合計上限」で、ピークを swap (1.9GB ある) に逃がして「遅くなるが死なない」に倒すためのもの。調整は `WORKER_MEMORY=700m ./run.sh ...`。
 

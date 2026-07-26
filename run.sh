@@ -162,6 +162,68 @@ case "${1:-}" in
       "$IMAGE_NAME" python -m src.parse_xbrl
     ;;
 
+  xbrl-daily)
+    # CI (GitHub Actions) から叩く用。detached で起動して外からポーリングで待つ。
+    #
+    # attached の `docker run` に依存すると、NAS のメモリが逼迫したときに
+    # **コンテナではなく docker クライアント側が殺され**、ステップは exit 137 で
+    # 失敗する一方でコンテナは daemon 配下で生き残って完走する、という「嘘の失敗」
+    # が起きる。実際 2026-07-26 の run は CI が 137 を返した 17 分後に 56 件を
+    # parse し終えて fetch_log に success を残していた (2026-07-24 のログでは
+    # `run.sh: line 34: 1856 Killed docker run --rm ...` とシェルが docker CLI の
+    # 死を直接報告している)。
+    #
+    # detached + 短命な docker inspect のポーリングなら、待ち側が一度殺されても
+    # 次の周回が拾えるし、待ち側が完全に死んでもコンテナは仕事を続けられる。
+    CONTAINER=stock-xbrl-daily
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$CONTAINER" \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -e LIMIT="${LIMIT:-}" \
+      -e DOC_TYPES="${DOC_TYPES:-}" \
+      -e ARELLE_CACHE_DIR=/app/data/arelle-cache \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      -v stock-arelle-cache:/app/data/arelle-cache \
+      "${MEM_ARGS[@]}" \
+      "$IMAGE_NAME" python -m src.parse_xbrl >/dev/null
+
+    printed=0
+    unknown=0
+    while true; do
+      running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || echo unknown)"
+      if [ "$running" = "unknown" ]; then
+        # inspect 自体が失敗 (CLI が殺された等)。数回まではリトライして粘る
+        unknown=$((unknown + 1))
+        [ "$unknown" -ge 5 ] && { echo "[run.sh] $CONTAINER の状態を取得できません"; exit 1; }
+      else
+        unknown=0
+      fi
+
+      # 増えたぶんのログだけ流す (CI のライブログ用)。
+      # 行数を数えてから tail するまでの間にログが伸びると取りこぼし + 重複が出るので、
+      # 必ず 1 回のスナップショットに対して数える → 切り出す
+      logs="$(docker logs "$CONTAINER" 2>&1 || true)"
+      if [ -n "$logs" ]; then
+        total="$(printf '%s\n' "$logs" | wc -l)"
+        if [ "$total" -gt "$printed" ]; then
+          printf '%s\n' "$logs" | tail -n "$((total - printed))"
+          printed="$total"
+        fi
+      fi
+
+      [ "$running" = "false" ] && break
+      sleep "${XBRL_POLL_INTERVAL:-20}"
+    done
+
+    code="$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER" 2>/dev/null || echo 1)"
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    echo "[run.sh] xbrl-daily finished (exit=$code)"
+    exit "$code"
+    ;;
+
   xbrl-bg)
     # 同上をデタッチ (5 年フル parse は arelle で doc 1 件 ~5-10 秒 × 数万件 = 数時間〜半日)
     docker rm -f stock-xbrl 2>/dev/null || true
