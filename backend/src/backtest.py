@@ -27,7 +27,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -53,6 +53,16 @@ class BacktestConfig:
     initial_capital: float = 1_000_000.0
     commission_bps: int = 10
     name: str | None = None
+    # 1 トレードあたりの投入額 (円)。None なら従来どおり「残現金 ÷ 当日の新規建て数」の
+    # 等額配分。固定額にすると 1 トレードの損益が資金推移に依らなくなり、明細の比較が
+    # できるようになる (等額配分だと同じ % 損益でも建てた日によって金額が数十倍変わる)
+    position_size: float | None = None
+    # 1 トレードあたりの固定株数 (例: 100 = 1 単元)。指定すると position_size より優先し、
+    # 銘柄の値段に関係なく常に同じ株数で建てる
+    position_shares: int | None = None
+    # 同時保有できる銘柄数の上限 (枠数)。None で無制限。埋まっている日のシグナルは
+    # 見送る = 機会損失として結果に出る。枠が競合した日は銘柄コード昇順で先着
+    max_positions: int | None = None
     # resolve_universe 後に埋まる
     universe_codes: list[str] = field(default_factory=list)
 
@@ -62,8 +72,89 @@ class BacktestConfig:
 # -------------------------------------------------------------------
 
 
-def resolve_universe(engine, spec: str) -> list[str]:
+def _resolve_screen_universe(engine, spec_body: str, as_of: date) -> list[str]:
+    """`screen:` spec を解決する (osgf_rule.md のスクリーニング条件と同じ形)。
+
+    `screen:market=プライム,min_turnover=1000000000,max_price=4000,days=20`
+    (キーは全て省略可。省略時は上記が既定値 = notify.json の実運用値)
+
+    - market      : listed_info の market_code 完全一致 or market_name 前方一致
+    - min_turnover: 直近 days 営業日の AVG(turnover_value) 下限 (円)
+    - max_price   : as_of 時点の直近 adjustment_close 上限 (円)
+    - days        : 平均売買代金の対象営業日数
+
+    **判定は as_of (バックテスト開始日) 時点で 1 回だけ**行い、以降は universe を固定する。
+    先読みを避けるため to_date ではなく from_date で評価している (期中に条件を満たさ
+    なくなった銘柄も残るし、期中に満たすようになった銘柄は入らない)。
+    """
+    market: str | None = "プライム"
+    min_turnover: float | None = 1_000_000_000.0
+    max_price: float | None = 4000.0
+    days = 20
+
+    for kv in spec_body.split(","):
+        kv = kv.strip()
+        if not kv:
+            continue
+        if "=" not in kv:
+            raise ValueError(f"screen spec の項目は k=v 形式: {kv!r}")
+        k, v = (x.strip() for x in kv.split("=", 1))
+        if k == "market":
+            market = v or None
+        elif k == "min_turnover":
+            min_turnover = float(v) if v else None
+        elif k == "max_price":
+            max_price = float(v) if v else None
+        elif k == "days":
+            days = int(v)
+        else:
+            raise ValueError(f"unknown screen key: {k!r}")
+
+    params: dict[str, Any] = {
+        "as_of": as_of,
+        "from_date": as_of - timedelta(days=int(days * 1.5)),
+    }
+    where = ["1=1"]
+    if market:
+        where.append("(l.market_code = :mkt OR l.market_name LIKE CONCAT(:mkt, '%'))")
+        params["mkt"] = market
+
+    cond = []
+    if min_turnover is not None:
+        cond.append("t.avg_turnover >= :min_turnover")
+        params["min_turnover"] = min_turnover
+    if max_price is not None:
+        cond.append("t.last_close <= :max_price")
+        params["max_price"] = max_price
+
+    # 窓関数で「期間平均売買代金」と「as_of 直近の終値」を 1 パスで出す。
+    # as_of が非営業日でも、その日以前で最後に値がある日を採用する。
+    sql = (
+        "SELECT t.code FROM ("
+        "  SELECT q.code AS code,"
+        "         AVG(q.turnover_value) OVER (PARTITION BY q.code) AS avg_turnover,"
+        "         q.adjustment_close AS last_close,"
+        "         ROW_NUMBER() OVER (PARTITION BY q.code ORDER BY q.trade_date DESC) AS rn"
+        "    FROM daily_quotes q"
+        "    JOIN listed_info l ON l.code = q.code"
+        f"   WHERE {' AND '.join(where)}"
+        "     AND q.trade_date BETWEEN :from_date AND :as_of"
+        "     AND q.adjustment_close IS NOT NULL"
+        ") t WHERE t.rn = 1"
+        + ("".join(f" AND {c}" for c in cond))
+        + " ORDER BY t.code"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [r[0] for r in rows]
+
+
+def resolve_universe(engine, spec: str, as_of: date | None = None) -> list[str]:
     spec = spec.strip()
+    if spec.startswith("screen:"):
+        if as_of is None:
+            raise ValueError("screen: spec には as_of (from_date) が必要")
+        return _resolve_screen_universe(engine, spec[len("screen:") :], as_of)
     if spec == "all":
         sql = "SELECT code FROM listed_info ORDER BY code"
         with engine.connect() as conn:
@@ -84,7 +175,8 @@ def resolve_universe(engine, spec: str) -> list[str]:
         return [spec[len("single:") :].strip()]
     raise ValueError(
         f"unknown universe spec: {spec!r}. "
-        f"use 'all' / 'scale:<name>' / 'codes:7203,9984,...' / 'single:7203'"
+        f"use 'all' / 'scale:<name>' / 'codes:7203,9984,...' / 'single:7203' / "
+        f"'screen:market=プライム,min_turnover=1000000000,max_price=4000,days=20'"
     )
 
 
@@ -101,8 +193,19 @@ def load_quotes(
 ) -> dict[str, pd.DataFrame]:
     """銘柄ごとに DatetimeIndex (DATE) + open/high/low/close/volume の DataFrame を返す。
 
-    adjustment_* (split/併合調整済み) を使う。adjustment_close が NULL の行は除外。
-    universe 数 × 期間で 1 クエリで一括取得 → code で groupby で銘柄ごとに切り分け。
+    **分割・併合は `adjustment_factor` から自前で遡及調整する。**
+
+    DB の `adjustment_*` 列は使えない。`fetch_prices` が `INSERT IGNORE` で過去行を
+    更新しないため、各行の `adjustment_*` は「その日を取得した時点」の値のまま固定
+    されており、後から起きた分割が過去に反映されない (実際 8053 は 2026-06-29 の
+    4:1 分割前後で adjustment_close = close のままで、系列に -75% の偽ギャップが残る)。
+    偽ギャップは SL を叩き、OSGF / ATR / 200MA も歪めるので、バックテストとしては致命的。
+
+    そこで生の OHLCV を読み、銘柄ごとに **その日より後の adjustment_factor の累積積**を
+    掛けて過去側を現在の株数基準に揃える (J-Quants の AdjustmentFactor は ex 日に
+    「それ以前の価格に掛ける倍率」が入る)。出来高は逆数を掛ける。
+
+    adjustment_close ではなく close が NULL の行を除外する。
     """
     if not codes:
         return {}
@@ -115,14 +218,11 @@ def load_quotes(
     params["to_date"] = to_date
 
     sql = (
-        "SELECT code, trade_date, "
-        "  adjustment_open AS open, adjustment_high AS high, "
-        "  adjustment_low AS low, adjustment_close AS close, "
-        "  adjustment_volume AS volume "
+        "SELECT code, trade_date, open, high, low, close, volume, adjustment_factor "
         "FROM daily_quotes "
         f"WHERE code IN ({placeholders}) "
         "  AND trade_date BETWEEN :from_date AND :to_date "
-        "  AND adjustment_close IS NOT NULL "
+        "  AND close IS NOT NULL "
         "ORDER BY code, trade_date"
     )
 
@@ -136,7 +236,17 @@ def load_quotes(
     out: dict[str, pd.DataFrame] = {}
     for code, sub in df.groupby("code", sort=False):
         sub = sub.set_index("trade_date").sort_index()
-        out[str(code)] = sub[["open", "high", "low", "close", "volume"]].astype(float)
+        cols = sub[["open", "high", "low", "close", "volume"]].astype(float)
+
+        factor = sub["adjustment_factor"].astype(float).fillna(1.0).replace(0.0, 1.0)
+        # cum[t] = t より後の factor の積 (t 自身は含めない)。
+        # 例: 6/29 に factor 0.25 なら、6/28 以前の価格に 0.25 を掛けて現在基準に揃える。
+        cum = factor.shift(-1)[::-1].cumprod()[::-1].fillna(1.0)
+        for c in ("open", "high", "low", "close"):
+            cols[c] = cols[c] * cum
+        cols["volume"] = cols["volume"] / cum
+
+        out[str(code)] = cols
     return out
 
 
@@ -180,6 +290,7 @@ def run_backtest(
     config: BacktestConfig,
     data: dict[str, pd.DataFrame],
     signals: dict[str, pd.Series],
+    plans: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[list[ClosedTrade], list[EquityPoint]]:
     """データとシグナル所与で event-driven バックテストを走らせる。
 
@@ -188,8 +299,30 @@ def run_backtest(
       2. 既存ポジションへの sell signal を処理 (現金化)
       3. 新規 buy signal を等額配分で entry
       4. equity 記録
+
+    `plans` は `Strategy.execution_plan()` の戻り (code → price/reason の DataFrame)。
+    逆指値 / 指値のようにバー内の特定価格で約定する戦略のために、close の代わりに
+    使う約定価格と exit 理由をエンジンに渡す。None または NaN の日は close 約定。
     """
-    initial_capital = float(config.initial_capital)
+    plans = plans or {}
+
+    def _exec(code: str, d: pd.Timestamp, fallback: float) -> tuple[float, str]:
+        """(約定価格, exit 理由ラベル) を返す。plan が無ければ close 約定・理由は signal。"""
+        plan = plans.get(code)
+        if plan is None or d not in plan.index:
+            return fallback, "signal"
+        price = plan.at[d, "price"]
+        reason = str(plan.at[d, "reason"] or "")
+        if price is None or pd.isna(price) or float(price) <= 0:
+            return fallback, reason or "signal"
+        return float(price), reason or "signal"
+
+    # 固定株数モードでは現金制約を外す (資金を先に決める必要が無くなる)。
+    # 現金 0 から始めて建玉ぶんマイナスに振らせるので、cash + 時価 = 累積損益になる。
+    # 必要資金は「同時保有の最大建玉額」を実測して後から逆算し、リターン系の指標は
+    # その実測値を分母にする。
+    unlimited_cash = config.position_shares is not None
+    initial_capital = 0.0 if unlimited_cash else float(config.initial_capital)
     bps = float(config.commission_bps) / 10000.0  # 片道 (0.001 = 0.1%)
 
     # 全銘柄の全日付 union (sorted)
@@ -203,6 +336,7 @@ def run_backtest(
     trades: list[ClosedTrade] = []
     equity_curve: list[EquityPoint] = []
     running_max = initial_capital
+    peak_exposure = 0.0  # 同時保有の建玉時価の最大 (= 実際に必要だった資金)
 
     for d in all_dates:
         # ---- 1. exit signal の処理 ----
@@ -215,7 +349,7 @@ def run_backtest(
             df = data[code]
             if d not in df.index:
                 continue
-            exit_price = float(df.loc[d, "close"])
+            exit_price, exit_reason = _exec(code, d, float(df.loc[d, "close"]))
             pos = positions[code]
             gross = pos.shares * exit_price
             exit_commission = gross * bps
@@ -236,7 +370,7 @@ def run_backtest(
                     commission=commission_total,
                     pnl=pnl,
                     pnl_pct=pnl_pct,
-                    exit_reason="signal",
+                    exit_reason=exit_reason,
                 )
             )
             del positions[code]
@@ -253,24 +387,38 @@ def run_backtest(
             df = data[code]
             if d not in df.index:
                 continue
-            price = float(df.loc[d, "close"])
+            price, _reason = _exec(code, d, float(df.loc[d, "close"]))
             if price <= 0:
                 continue
             entries_today.append((code, price))
 
-        if entries_today and cash > 0:
-            per_position = cash / len(entries_today)
+        if entries_today and (unlimited_cash or cash > 0):
+            fixed = config.position_size
+            fixed_shares = config.position_shares
+            per_position = float(fixed) if fixed else cash / len(entries_today)
+            # 枠数上限がある場合、同日に複数シグナルが出たら銘柄コード昇順で先着
+            if config.max_positions is not None:
+                entries_today.sort(key=lambda e: e[0])
             for code, price in entries_today:
+                if (
+                    config.max_positions is not None
+                    and len(positions) >= config.max_positions
+                ):
+                    break  # 枠が埋まっている日のシグナルは見送り (機会損失として計上されない)
+                if fixed and not fixed_shares and cash < per_position:
+                    continue  # 固定額を用意できない日は見送り (資金切れ)
                 # 手数料込みでフィットする株数を計算
                 cost_per_share = price * (1 + bps)
-                shares = int(per_position / cost_per_share)
+                shares = (
+                    int(fixed_shares) if fixed_shares else int(per_position / cost_per_share)
+                )
                 if shares <= 0:
                     continue
                 gross = shares * price
                 entry_commission = gross * bps
                 cost = gross + entry_commission
-                if cost > cash:
-                    continue  # 端数で超えたら skip
+                if not unlimited_cash and cost > cash:
+                    continue  # 端数で超えたら skip (固定株数モードは現金制約なし)
                 cash -= cost
                 positions[code] = OpenPosition(
                     entry_date=d,
@@ -280,15 +428,17 @@ def run_backtest(
                 )
 
         # ---- 3. 日末 equity 集計 ----
-        equity = cash
+        market_value = 0.0
         for code, pos in positions.items():
             df = data[code]
             if d in df.index:
-                equity += pos.shares * float(df.loc[d, "close"])
+                market_value += pos.shares * float(df.loc[d, "close"])
             else:
                 # その日に値が無ければ entry 価格で評価 (上場廃止前後等のレアケース)
-                equity += pos.shares * pos.entry_price
+                market_value += pos.shares * pos.entry_price
+        peak_exposure = max(peak_exposure, market_value)
 
+        equity = cash + market_value
         running_max = max(running_max, equity)
         drawdown = 1.0 - equity / running_max if running_max > 0 else 0.0
         equity_curve.append(
@@ -332,6 +482,18 @@ def run_backtest(
                     exit_reason="end_of_test",
                 )
             )
+
+    if unlimited_cash:
+        # 資金を入力に取らないモード: equity は「累積損益」なので、実測した必要資金
+        # (同時保有の建玉時価の最大) を下駄にして通常の equity curve と同じ土俵に乗せる。
+        # これでリターン / DD / Sharpe が「実際に必要だった資金に対する比率」になる。
+        base = peak_exposure if peak_exposure > 0 else 1.0
+        config.initial_capital = base
+        running_max = base
+        for p in equity_curve:
+            p.equity += base
+            running_max = max(running_max, p.equity)
+            p.drawdown = 1.0 - p.equity / running_max if running_max > 0 else 0.0
 
     return trades, equity_curve
 
@@ -440,12 +602,15 @@ def finish_run_success(
     metrics: dict[str, Any],
     trades: list[ClosedTrade],
     equity_curve: list[EquityPoint],
+    initial_capital: float | None = None,
 ) -> None:
     with engine.begin() as conn:
         conn.execute(
             text(
                 "UPDATE backtest_runs SET "
-                "  final_equity = :final_equity, "
+                # 固定株数モードでは実測した必要資金 (同時保有建玉の最大) で上書きする
+                + ("  initial_capital = :initial_capital, " if initial_capital else "")
+                + "  final_equity = :final_equity, "
                 "  total_return = :total_return, "
                 "  cagr = :cagr, "
                 "  max_drawdown = :max_drawdown, "
@@ -457,7 +622,7 @@ def finish_run_success(
                 "  finished_at = NOW() "
                 "WHERE id = :id"
             ),
-            {**metrics, "id": run_id},
+            {**metrics, "id": run_id, "initial_capital": initial_capital},
         )
 
         if trades:
@@ -540,7 +705,7 @@ def run(config: BacktestConfig) -> int:
     engine = get_engine()
 
     # universe 解決
-    codes = resolve_universe(engine, config.universe_spec)
+    codes = resolve_universe(engine, config.universe_spec, as_of=config.from_date)
     if not codes:
         raise RuntimeError(f"universe spec '{config.universe_spec}' で 0 銘柄")
     config.universe_codes = codes
@@ -570,25 +735,39 @@ def run(config: BacktestConfig) -> int:
         # (履歴不足ぶんを 0 で埋めた歪んだ値) ため、NaN 任せだと偽シグナルが出る。
         warmup = strategy.required_warmup()
         signals: dict[str, pd.Series] = {}
+        plans: dict[str, pd.DataFrame] = {}
         for code, df in data.items():
             sig = strategy.generate_signals(df)
             if warmup > 0:
                 sig.iloc[:warmup] = 0
             signals[code] = sig
+            plan = strategy.execution_plan(df)
+            if plan is not None:
+                plans[code] = plan
         print(
             f"[backtest] signals generated for {len(signals)} 銘柄 "
-            f"(先頭 {warmup} バーは warmup として無視)"
+            f"(先頭 {warmup} バーは warmup として無視"
+            + (f" / 約定価格 plan あり" if plans else "")
+            + ")"
         )
 
         # event-driven 実行
-        trades, equity_curve = run_backtest(config, data, signals)
+        trades, equity_curve = run_backtest(config, data, signals, plans or None)
         print(
             f"[backtest] simulation done: {len(trades)} trades, "
             f"{len(equity_curve)} equity points"
         )
 
         # メトリクス計算
+        # 固定株数モードでは run_backtest が config.initial_capital に
+        # 「実測した必要資金 (同時保有建玉の最大)」を書き戻している
         metrics = compute_metrics(equity_curve, trades, config.initial_capital)
+        if config.position_shares:
+            total_pnl = sum(t.pnl for t in trades)
+            print(
+                f"[backtest] {config.position_shares} 株固定 / 必要資金 (実測) "
+                f"={config.initial_capital:,.0f} 円 / 累積損益={total_pnl:,.0f} 円"
+            )
         print(
             f"[backtest] metrics: "
             f"final={metrics['final_equity']:,.0f} "
@@ -601,7 +780,14 @@ def run(config: BacktestConfig) -> int:
         )
 
         # 永続化
-        finish_run_success(engine, run_id, metrics, trades, equity_curve)
+        finish_run_success(
+            engine,
+            run_id,
+            metrics,
+            trades,
+            equity_curve,
+            initial_capital=config.initial_capital if config.position_shares else None,
+        )
         print(f"[backtest] run_id={run_id} status=success (persisted)")
         return run_id
 
@@ -668,7 +854,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--universe",
         required=True,
-        help="universe spec。'all' / 'scale:TOPIX Large 70' / 'codes:7203,9984' / 'single:1301'",
+        help=(
+            "universe spec。'all' / 'scale:TOPIX Large 70' / 'codes:7203,9984' / "
+            "'single:1301' / 'screen:market=プライム,min_turnover=1000000000,"
+            "max_price=4000,days=20' (screen は --from 時点で 1 回だけ判定)"
+        ),
     )
     p.add_argument("--from", dest="from_date", required=True, help="YYYY-MM-DD")
     p.add_argument("--to", dest="to_date", required=True, help="YYYY-MM-DD")
@@ -680,6 +870,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=10,
         help="片道手数料 (basis points、default 10 = 0.10%%)",
+    )
+    p.add_argument(
+        "--position-size",
+        type=float,
+        default=None,
+        help=(
+            "1 トレードあたりの投入額 (円)。指定すると固定額でエントリーし、"
+            "用意できない日は見送る。未指定なら残現金の等額配分 (従来動作)"
+        ),
+    )
+    p.add_argument(
+        "--position-shares",
+        type=int,
+        default=None,
+        help=(
+            "1 トレードあたりの固定株数 (例: 100 = 1 単元)。--position-size より優先。"
+            "値段に関係なく同じ株数で建てるので、明細の 1 トレード比較がしやすい"
+        ),
+    )
+    p.add_argument(
+        "--max-positions",
+        type=int,
+        default=None,
+        help="同時保有できる銘柄数の上限 (枠数)。未指定で無制限。枠が競合した日はコード昇順で先着",
     )
     p.add_argument("--name", default=None, help="任意ラベル (DB の name 列に保存)")
     return p.parse_args(argv)
@@ -696,6 +910,9 @@ def main(argv: list[str] | None = None) -> int:
             to_date=datetime.strptime(args.to_date, "%Y-%m-%d").date(),
             initial_capital=args.capital,
             commission_bps=args.commission,
+            position_size=args.position_size,
+            position_shares=args.position_shares,
+            max_positions=args.max_positions,
             name=args.name,
         )
         run(config)
