@@ -32,6 +32,38 @@ class GeminiResponseError(GeminiError):
     """レスポンスは返ったが中身が使えない (MAX_TOKENS で切れた等)。バッチ側で分割リトライする。"""
 
 
+class GeminiQuotaError(GeminiError):
+    """日次クォータ超過。待っても当日は回復しないので、ジョブごと打ち切る。
+
+    無料枠は「モデルごと・プロジェクトごとの 1 日あたりリクエスト数」で切られており
+    (quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier)、リトライは無意味。
+    1 リクエストあたりの銘柄数を増やすか、翌日に回すか、課金を有効にする。
+    """
+
+
+def _quota_info(r: requests.Response) -> dict[str, Any]:
+    """429 レスポンスから「日次かどうか」と retryDelay を取り出す。"""
+    out: dict[str, Any] = {"per_day": False, "value": None, "retry_after": None}
+    try:
+        details = r.json().get("error", {}).get("details", [])
+    except ValueError:
+        return out
+    for d in details:
+        t = d.get("@type", "")
+        if t.endswith("QuotaFailure"):
+            for v in d.get("violations", []):
+                if "PerDay" in (v.get("quotaId") or ""):
+                    out["per_day"] = True
+                    out["value"] = v.get("quotaValue")
+        elif t.endswith("RetryInfo"):
+            delay = str(d.get("retryDelay", "")).rstrip("s")
+            try:
+                out["retry_after"] = float(delay)
+            except ValueError:
+                pass
+    return out
+
+
 class GeminiClient:
     def __init__(self, model: str | None = None):
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -72,9 +104,19 @@ class GeminiClient:
             timeout=180,
         )
         if r.status_code == 429:
-            # レート超過。tenacity のバックオフに乗せる前に少し寝かせる
-            time.sleep(20)
-            raise requests.exceptions.RequestException("429 rate limited")
+            info = _quota_info(r)
+            if info["per_day"]:
+                # 日次クォータは待っても当日は回復しない
+                raise GeminiQuotaError(
+                    f"日次クォータ超過 (model={self.model}, limit={info['value']}/day)。"
+                    "GEMINI_BATCH_SIZE を上げて 1 日のリクエスト数を減らすか、"
+                    "翌日に回すか、課金を有効にしてください"
+                )
+            # 分あたりのレート超過。サーバが提示する retryDelay があればそれに従う
+            time.sleep(info["retry_after"] or 20)
+            raise requests.exceptions.RequestException(
+                f"429 rate limited (retry in {info['retry_after']}s)"
+            )
         if r.status_code >= 500:
             raise requests.exceptions.RequestException(f"{r.status_code}: {r.text[:200]}")
         if r.status_code != 200:
