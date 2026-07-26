@@ -20,8 +20,10 @@ export default function RootLayout({
             </div>
             <nav className="nav">
               <Link href="/">銘柄一覧</Link>
-              <Link href="/sectors">業種ヒートマップ</Link>
-              <Link href="/sectors/rs">相対強度</Link>
+              <Link href="/sectors">業種</Link>
+              <Link href="/sectors/rs">業種RS</Link>
+              <Link href="/themes">テーマ</Link>
+              <Link href="/themes/rs">テーマRS</Link>
             </nav>
             <span className="spacer" />
             <span className="crumb mono">J-Quants V2 / local</span>
