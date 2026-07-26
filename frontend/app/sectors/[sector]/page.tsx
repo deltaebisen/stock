@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getSectorConstituents } from "@/lib/sectors";
 import { fmtNumber, fmtPercent, fmtPrice } from "@/lib/format";
+import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
 
 export const dynamic = "force-dynamic";
 
@@ -17,18 +18,34 @@ export default async function SectorDetailPage({
   searchParams,
 }: {
   params: Promise<{ sector: string }>;
-  searchParams: Promise<{ level?: string; bars?: string }>;
+  searchParams: Promise<{ level?: string; bars?: string; sort?: string; dir?: string }>;
 }) {
   const { sector } = await params;
   const sp = await searchParams;
   const level = sp.level === "sector17" ? "sector17" : "sector33";
   const bars = RANGES.some((r) => String(r.bars) === sp.bars) ? Number(sp.bars) : 20;
 
-  const { asOf, sectorName, rows } = await getSectorConstituents(
+  const { asOf, sectorName, rows: unsorted } = await getSectorConstituents(
     decodeURIComponent(sector),
     bars,
     level,
   );
+
+  type Row = (typeof unsorted)[number];
+  const PICKS: Record<string, (r: Row) => number | string | null> = {
+    code: (r) => r.code,
+    name: (r) => r.company_name,
+    market: (r) => r.market_name,
+    scale: (r) => r.scale_category,
+    close: (r) => r.last_close,
+    ret: (r) => r.ret,
+    turnover: (r) => r.avg_turnover,
+  };
+  const sortKey = sp.sort && PICKS[sp.sort] ? sp.sort : "ret";
+  const dir: SortDir = sp.dir === "asc" ? "asc" : "desc";
+  const rows = [...unsorted].sort(byKey(PICKS[sortKey], dir));
+  const base = `/sectors/${encodeURIComponent(sector)}`;
+  const keep = { level, bars: String(bars) };
 
   const valid = rows.filter((r) => r.ret !== null);
   const avg = valid.length ? valid.reduce((s, r) => s + (r.ret ?? 0), 0) / valid.length : null;
@@ -43,7 +60,7 @@ export default async function SectorDetailPage({
         {RANGES.map((r) => (
           <Link
             key={r.bars}
-            href={`/sectors/${encodeURIComponent(sector)}?level=${level}&bars=${r.bars}`}
+            href={`${base}?level=${level}&bars=${r.bars}&sort=${sortKey}&dir=${dir}`}
             className={`btn ${bars === r.bars ? "active" : ""}`}
           >
             {r.label}
@@ -78,13 +95,13 @@ export default async function SectorDetailPage({
         <table className="data">
           <thead>
             <tr>
-              <th>コード</th>
-              <th>銘柄名</th>
-              <th>市場</th>
-              <th>規模</th>
-              <th className="num">終値</th>
-              <th className="num">期間リターン</th>
-              <th className="num">平均売買代金</th>
+              <SortTh label="コード" sortKey="code" sort={sortKey} dir={dir} basePath={base} keep={keep} />
+              <SortTh label="銘柄名" sortKey="name" sort={sortKey} dir={dir} basePath={base} keep={keep} />
+              <SortTh label="市場" sortKey="market" sort={sortKey} dir={dir} basePath={base} keep={keep} />
+              <SortTh label="規模" sortKey="scale" sort={sortKey} dir={dir} basePath={base} keep={keep} />
+              <SortTh label="終値" sortKey="close" sort={sortKey} dir={dir} basePath={base} keep={keep} num />
+              <SortTh label="期間リターン" sortKey="ret" sort={sortKey} dir={dir} basePath={base} keep={keep} num />
+              <SortTh label="平均売買代金" sortKey="turnover" sort={sortKey} dir={dir} basePath={base} keep={keep} num />
             </tr>
           </thead>
           <tbody>

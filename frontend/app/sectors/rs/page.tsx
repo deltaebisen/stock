@@ -1,17 +1,17 @@
 import Link from "next/link";
 import { getSectorRelativeStrength } from "@/lib/sectors";
 import { fmtPercent } from "@/lib/format";
+import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
 
 export const dynamic = "force-dynamic";
 
-type SearchParams = { level?: string; bars?: string; sectors?: string; sort?: string };
-
-/** 並べ替えキー。既定は先週差 (直近の勢いの変化を見たいケースが多いので) */
-const SORTS = {
-  week: { label: "先週差", pick: (s: { rsChangeWeek: number }) => s.rsChangeWeek },
-  period: { label: "期間 RS 変化率", pick: (s: { rsChange: number }) => s.rsChange },
-} as const;
-type SortKey = keyof typeof SORTS;
+type SearchParams = {
+  level?: string;
+  bars?: string;
+  sectors?: string;
+  sort?: string;
+  dir?: string;
+};
 
 const RANGES = [
   { bars: 60, label: "3ヶ月" },
@@ -33,11 +33,23 @@ export default async function SectorRsPage({
   const sp = await searchParams;
   const level = sp.level === "sector17" ? "sector17" : "sector33";
   const bars = RANGES.some((r) => String(r.bars) === sp.bars) ? Number(sp.bars) : 120;
-  const sort: SortKey = sp.sort === "period" ? "period" : "week";
-
   const { asOf, series: raw } = await getSectorRelativeStrength(bars, level);
-  const series = [...raw].sort((a, b) => SORTS[sort].pick(b) - SORTS[sort].pick(a));
+
+  type Row = (typeof raw)[number];
+  const PICKS: Record<string, (r: Row) => number | string | null> = {
+    name: (r) => r.sector_name,
+    week: (r) => r.rsChangeWeek,
+    retweek: (r) => r.retWeek,
+    excess: (r) => r.excessWeek,
+    period: (r) => r.rsChange,
+    ret: (r) => (r.index[r.index.length - 1] ?? 100) / 100 - 1,
+    rs: (r) => r.rs[r.rs.length - 1] ?? 100,
+  };
+  const sort = sp.sort && PICKS[sp.sort] ? sp.sort : "week";
+  const dir: SortDir = sp.dir === "asc" ? "asc" : "desc";
+  const series = [...raw].sort(byKey(PICKS[sort], dir));
   const weekAgoDate = series[0]?.weekAgoDate ?? null;
+  const keep = { level, bars: String(bars), sectors: sp.sectors };
 
   // 既定は並べ替えキーの上位 5 / 下位 5。sectors= で明示指定も可
   const picked = sp.sectors
@@ -74,7 +86,7 @@ export default async function SectorRsPage({
         {RANGES.map((r) => (
           <Link
             key={r.bars}
-            href={`/sectors/rs?level=${level}&bars=${r.bars}&sort=${sort}`}
+            href={`/sectors/rs?level=${level}&bars=${r.bars}&sort=${sort}&dir=${dir}`}
             className={`btn ${bars === r.bars ? "active" : ""}`}
           >
             {r.label}
@@ -171,27 +183,13 @@ export default async function SectorRsPage({
         <table className="data">
           <thead>
             <tr>
-              <th>業種</th>
-              <th className="num">
-                <Link
-                  href={`/sectors/rs?level=${level}&bars=${bars}&sort=week`}
-                  style={{ color: sort === "week" ? "var(--accent)" : "inherit" }}
-                >
-                  先週差 (RS)
-                </Link>
-              </th>
-              <th className="num">先週比リターン</th>
-              <th className="num">対市場 超過</th>
-              <th className="num">
-                <Link
-                  href={`/sectors/rs?level=${level}&bars=${bars}&sort=period`}
-                  style={{ color: sort === "period" ? "var(--accent)" : "inherit" }}
-                >
-                  期間 RS 変化率
-                </Link>
-              </th>
-              <th className="num">期間リターン</th>
-              <th className="num">RS (現在)</th>
+              <SortTh label="業種" sortKey="name" sort={sort} dir={dir} basePath="/sectors/rs" keep={keep} />
+              <SortTh label="先週差 (RS)" sortKey="week" sort={sort} dir={dir} basePath="/sectors/rs" keep={keep} num />
+              <SortTh label="先週比リターン" sortKey="retweek" sort={sort} dir={dir} basePath="/sectors/rs" keep={keep} num />
+              <SortTh label="対市場 超過" sortKey="excess" sort={sort} dir={dir} basePath="/sectors/rs" keep={keep} num />
+              <SortTh label="期間 RS 変化率" sortKey="period" sort={sort} dir={dir} basePath="/sectors/rs" keep={keep} num />
+              <SortTh label="期間リターン" sortKey="ret" sort={sort} dir={dir} basePath="/sectors/rs" keep={keep} num />
+              <SortTh label="RS (現在)" sortKey="rs" sort={sort} dir={dir} basePath="/sectors/rs" keep={keep} num />
               <th>表示</th>
             </tr>
           </thead>
@@ -225,7 +223,7 @@ export default async function SectorRsPage({
                   <td className="num mono">{(s.rs[s.rs.length - 1] ?? 100).toFixed(1)}</td>
                   <td>
                     <Link
-                      href={`/sectors/rs?level=${level}&bars=${bars}&sort=${sort}&sectors=${next.join(",")}`}
+                      href={`/sectors/rs?level=${level}&bars=${bars}&sort=${sort}&dir=${dir}&sectors=${next.join(",")}`}
                       className="btn"
                     >
                       {on ? "隠す" : "出す"}
