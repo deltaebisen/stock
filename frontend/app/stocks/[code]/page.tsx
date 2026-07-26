@@ -21,7 +21,7 @@ export default async function StockDetailPage({
     getStockSummary(code),
     getThemesForCodes([code]),
   ]);
-  // 確信度の高い順。1 銘柄が複数テーマに属する
+  // 関連の強い順 (LLM の確信度でソート)。1 銘柄が複数テーマに属する
   const themes = themeMap.get(code) ?? [];
 
   if (!listed) notFound();
@@ -60,12 +60,8 @@ export default async function StockDetailPage({
                 key={t.theme_code}
                 href={`/themes/${encodeURIComponent(t.theme_code)}`}
                 className="tag theme"
-                title={`確信度 ${t.confidence.toFixed(2)}`}
               >
                 {t.theme_name}
-                <span className="muted mono" style={{ marginLeft: 6, fontSize: 11 }}>
-                  {t.confidence.toFixed(1)}
-                </span>
               </Link>
             ))
           )}

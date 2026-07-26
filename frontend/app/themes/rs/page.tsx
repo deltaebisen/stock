@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getThemeRelativeStrength } from "@/lib/themes";
+import { getThemeCatalog, getThemeRelativeStrength } from "@/lib/themes";
 import { fmtPercent } from "@/lib/format";
 import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
 import { RsChart } from "@/app/_components/RsChart";
@@ -11,14 +11,15 @@ type SearchParams = {
   themes?: string;
   sort?: string;
   dir?: string;
-  minconf?: string;
   minmembers?: string;
+  cat?: string;
 };
 
 const RANGES = [
+  { bars: 20, label: "1ヶ月" },
   { bars: 60, label: "3ヶ月" },
   { bars: 120, label: "6ヶ月" },
-  { bars: 240, label: "1年" },
+  { bars: 240, label: "12ヶ月" },
 ];
 
 /** 構成銘柄が少なすぎるテーマは指数として意味を持たないので既定で除外する */
@@ -30,16 +31,24 @@ export default async function ThemeRsPage({
   searchParams: Promise<SearchParams>;
 }) {
   const sp = await searchParams;
-  const bars = RANGES.some((r) => String(r.bars) === sp.bars) ? Number(sp.bars) : 120;
-  const minconf = sp.minconf ? Number(sp.minconf) : 0;
+  const bars = RANGES.some((r) => String(r.bars) === sp.bars) ? Number(sp.bars) : 60;
   const minMembers = sp.minmembers ? Number(sp.minmembers) : DEFAULT_MIN_MEMBERS;
 
-  const { asOf, series: all } = await getThemeRelativeStrength(bars, minconf);
+  const [{ asOf, series: all }, catalog] = await Promise.all([
+    getThemeRelativeStrength(bars),
+    getThemeCatalog(),
+  ]);
+  const catOf = new Map(catalog.map((c) => [c.theme_code, c.category]));
+  const categories = [...new Set(catalog.map((c) => c.category))].filter(Boolean);
+  const cat = categories.includes(sp.cat ?? "") ? sp.cat! : "";
   // 構成銘柄が少なすぎるテーマは指数が荒れるので除外する
-  const raw = all.filter((s) => s.count >= minMembers);
+  const raw = all
+    .filter((s) => s.count >= minMembers)
+    .filter((s) => !cat || catOf.get(s.group_code) === cat);
 
   type Row = (typeof raw)[number];
   const PICKS: Record<string, (r: Row) => number | string | null> = {
+    category: (r) => catOf.get(r.group_code) ?? "",
     name: (r) => r.group_name,
     week: (r) => r.rsChangeWeek,
     retweek: (r) => r.retWeek,
@@ -54,9 +63,9 @@ export default async function ThemeRsPage({
   const weekAgoDate = series[0]?.weekAgoDate ?? null;
   const keep = {
     bars: String(bars),
-    minconf: String(minconf),
     minmembers: String(minMembers),
     themes: sp.themes,
+    cat,
   };
 
   // 既定は並べ替えキーの上位 5 / 下位 5。themes= で明示指定も可
@@ -74,15 +83,33 @@ export default async function ThemeRsPage({
         {RANGES.map((r) => (
           <Link
             key={r.bars}
-            href={`/themes/rs?bars=${r.bars}&minconf=${minconf}&sort=${sort}&dir=${dir}`}
+            href={`/themes/rs?bars=${r.bars}&sort=${sort}&dir=${dir}`}
             className={`btn ${bars === r.bars ? "active" : ""}`}
           >
             {r.label}
           </Link>
         ))}
-        <Link href={`/themes?minconf=${minconf}`} className="btn">
+        <Link href={`/themes`} className="btn">
           ← ヒートマップ
         </Link>
+      </div>
+
+      <div className="toolbar" style={{ gap: 4 }}>
+        <Link
+          href={`/themes/rs?bars=${bars}&sort=${sort}&dir=${dir}`}
+          className={`btn ${cat === "" ? "active" : ""}`}
+        >
+          すべて
+        </Link>
+        {categories.map((c) => (
+          <Link
+            key={c}
+            href={`/themes/rs?bars=${bars}&sort=${sort}&dir=${dir}&cat=${encodeURIComponent(c)}`}
+            className={`btn ${cat === c ? "active" : ""}`}
+          >
+            {c}
+          </Link>
+        ))}
       </div>
 
       <p className="muted" style={{ margin: "0 0 12px" }}>
@@ -104,6 +131,7 @@ export default async function ThemeRsPage({
         <table className="data">
           <thead>
             <tr>
+              <SortTh label="大分類" sortKey="category" sort={sort} dir={dir} basePath="/themes/rs" keep={keep} />
               <SortTh label="テーマ" sortKey="name" sort={sort} dir={dir} basePath="/themes/rs" keep={keep} />
               <SortTh label="先週差 (RS)" sortKey="week" sort={sort} dir={dir} basePath="/themes/rs" keep={keep} num />
               <SortTh label="先週比リターン" sortKey="retweek" sort={sort} dir={dir} basePath="/themes/rs" keep={keep} num />
@@ -117,7 +145,7 @@ export default async function ThemeRsPage({
           <tbody>
             {series.length === 0 ? (
               <tr>
-                <td colSpan={8} className="muted" style={{ textAlign: "center", padding: 40 }}>
+                <td colSpan={9} className="muted" style={{ textAlign: "center", padding: 40 }}>
                   テーマの割当がまだありません (分類バッチ未実行)
                 </td>
               </tr>
@@ -130,8 +158,11 @@ export default async function ThemeRsPage({
                 const ret = ((s.index[s.index.length - 1] ?? 100) / 100 - 1) * 100;
                 return (
                   <tr key={s.group_code} style={on ? { background: "var(--bg-hover)" } : undefined}>
+                    <td className="muted" style={{ fontSize: 12 }}>
+                      {catOf.get(s.group_code) ?? "—"}
+                    </td>
                     <td>
-                      <Link href={`/themes/${encodeURIComponent(s.group_code)}?minconf=${minconf}`}>
+                      <Link href={`/themes/${encodeURIComponent(s.group_code)}`}>
                         {s.group_name}
                       </Link>
                     </td>
@@ -151,7 +182,7 @@ export default async function ThemeRsPage({
                     <td className="num mono">{(s.rs[s.rs.length - 1] ?? 100).toFixed(1)}</td>
                     <td>
                       <Link
-                        href={`/themes/rs?bars=${bars}&minconf=${minconf}&sort=${sort}&dir=${dir}&themes=${next.join(",")}`}
+                        href={`/themes/rs?bars=${bars}&sort=${sort}&dir=${dir}&themes=${next.join(",")}`}
                         className="btn"
                       >
                         {on ? "隠す" : "出す"}

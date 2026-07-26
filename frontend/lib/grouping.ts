@@ -35,13 +35,12 @@ export type GroupSource = {
 
 export type PeriodDef = { key: string; label: string; bars: number };
 
-/** ヒートマップの期間 (営業日数ベース) */
+/** ヒートマップの期間 (営業日数ベース)。週次で見る想定なので 1/3/6/12 ヶ月 */
 export const PERIODS: PeriodDef[] = [
-  { key: "1w", label: "1週", bars: 5 },
   { key: "1m", label: "1ヶ月", bars: 20 },
   { key: "3m", label: "3ヶ月", bars: 60 },
   { key: "6m", label: "6ヶ月", bars: 120 },
-  { key: "1y", label: "1年", bars: 240 },
+  { key: "12m", label: "12ヶ月", bars: 240 },
 ];
 
 export type GroupReturnRow = {

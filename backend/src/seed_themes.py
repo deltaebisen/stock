@@ -54,6 +54,15 @@ def main() -> int:
         for stmt in statements:
             conn.execute(text(stmt))
 
+    # 無効化されたテーマの割当は残しておくと画面や集計に出てしまうので消す
+    with engine.begin() as conn:
+        removed = conn.execute(
+            text(
+                "DELETE FROM theme_members WHERE theme_code IN "
+                "(SELECT theme_code FROM themes WHERE is_active = 0)"
+            )
+        ).rowcount
+
     with engine.connect() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM themes")).scalar_one()
         active = conn.execute(
@@ -62,7 +71,10 @@ def main() -> int:
         version = conn.execute(
             text("SELECT DATE_FORMAT(MAX(updated_at), '%Y%m%d%H%i') FROM themes")
         ).scalar_one()
-    print(f"[seed_themes] 完了: themes {total} 件 (有効 {active} 件) / version={version}")
+    print(
+        f"[seed_themes] 完了: themes {total} 件 (有効 {active} 件) / version={version}"
+        + (f" / 無効テーマの割当 {removed} 件を削除" if removed else "")
+    )
     return 0
 
 
