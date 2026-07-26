@@ -17,7 +17,10 @@ theme_members に入れる。1 銘柄が複数テーマに属する多対多で�
 
 環境変数:
     LIMIT              1 ジョブで分類する銘柄の上限 (smoke test 用)
-    GEMINI_BATCH_SIZE  1 リクエストの銘柄数 (デフォルト 40)
+    GEMINI_BATCH_SIZE  1 リクエストの銘柄数 (デフォルト 25)。
+                       大きくするとリクエスト数とコストは減るが、LLM が後半を
+                       雑に処理して「1 銘柄 1 テーマ」で済ませる傾向が出る
+                       (60〜100 で流したら平均 1.15 テーマ、25 で 1.9 前後)
     MAX_THEMES         1 銘柄に付ける最大テーマ数。0 = 無制限 (デフォルト)
     GEMINI_MODEL       使用モデル (gemini_client 側の既定は gemini-2.5-flash-lite)
 
@@ -143,6 +146,13 @@ def build_system_instruction(themes: list[dict], max_themes: int) -> str:
         "  業種が同じでも事業内容が違えば別のテーマになるし、業種をまたぐテーマもある",
         "  (例: 建設業でも太陽光発電所を主力にしていれば renewable、",
         "        商社でも防衛装備を扱っていれば defense を付ける)",
+        "- **業種と同義のテーマを 1 つ付けて終わりにしないこと**。それだけなら 33業種を",
+        "  見れば済む。付ける前に必ず「この会社は業種をまたぐテーマ (semiconductor /",
+        "  ai_datacenter / defense / inbound / ev_battery / renewable / nuclear /",
+        "  space / robotics_fa / cybersecurity / quantum など) に該当しないか」を",
+        "  一度確認し、該当するものがあれば併せて付ける",
+        "- 多くの企業は複数のテーマに該当する。単一テーマで確定させる前に、",
+        "  取扱製品・供給先・子会社の事業まで考えること",
         "- confidence は 0.0〜1.0。企業の事業内容を知らない場合は低い値にする",
         "- 入力された全ての銘柄コードについて、必ず 1 件ずつ結果を返す",
     ]
@@ -342,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
 
     limit_env = os.environ.get("LIMIT")
     limit = int(limit_env) if limit_env else None
-    batch_size = int(os.environ.get("GEMINI_BATCH_SIZE", "40"))
+    batch_size = int(os.environ.get("GEMINI_BATCH_SIZE", "25"))
     max_themes = int(os.environ.get("MAX_THEMES", "0"))  # 0 = 無制限
 
     engine = get_engine()
