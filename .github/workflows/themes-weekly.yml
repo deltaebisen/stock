@@ -1,0 +1,30 @@
+name: Weekly theme classification
+
+# 毎週日曜 06:00 JST = 土曜 21:00 UTC に NAS 上で実行。
+# edinet-weekly (日 05:00 JST) の 1 時間後にずらして、単一 runner の取り合いを避ける。
+#
+# やること:
+#   1. themes-seed  … sql/themes_seed.sql をそのまま流す (冪等)。テーマ定義を git と揃える
+#   2. themes       … 未分類・前回失敗・定義更新ぶんだけ Gemini に投げる差分実行
+#
+# 通常週は新規上場の数銘柄だけなので数十秒で終わる。themes_seed.sql を編集した週は
+# taxonomy_version が上がって全銘柄 (~4,100) が対象になり 10 分前後 + API 数十円かかる。
+on:
+  schedule:
+    - cron: '0 21 * * 6'
+  workflow_dispatch:
+
+jobs:
+  themes:
+    runs-on: self-hosted
+    # 全銘柄の再分類に入っても収まる長さ。通常週は数十秒で終わる
+    timeout-minutes: 60
+    steps:
+      - name: Seed theme taxonomy
+        # themes テーブルへ upsert。API を使わないので失敗しても課金は発生しない
+        run: bash "$NAS_WORKSPACE/run.sh" themes-seed
+
+      - name: Classify stocks into themes (diff)
+        # GEMINI_API_KEY は NAS の .env から --env-file で注入される
+        # (GitHub secrets は使わない。JQUANTS / EDINET と同じ流儀)
+        run: bash "$NAS_WORKSPACE/run.sh" themes

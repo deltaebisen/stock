@@ -162,6 +162,40 @@ case "${1:-}" in
       "$IMAGE_NAME" python -m src.parse_xbrl
     ;;
 
+  themes-seed)
+    # backend/sql/themes_seed.sql を流してテーマ定義 (themes テーブル) を投入/更新。
+    # SQL 側が INSERT ... ON DUPLICATE KEY UPDATE なので何回流しても同じ状態になる。
+    # sql/ はイメージに焼かれていない (Dockerfile は src/ しか COPY しない) のでマウントする
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/backend/sql:/app/sql:ro" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
+      "$IMAGE_NAME" python -m src.seed_themes
+    ;;
+
+  themes)
+    # 上場銘柄を投資テーマに分類する (Gemini API)。
+    # 台帳 (theme_classification) を見て未分類・失敗・定義更新ぶんだけ投げる差分実行。
+    # LIMIT=40 ./run.sh themes で 1 バッチだけの smoke test ができる。
+    # 全銘柄でも入出力 50 万トークン未満 = 数十円 (無料枠内に収まる想定)
+    docker run --rm \
+      --network host \
+      --env-file .env \
+      -e PYTHONUNBUFFERED=1 \
+      -e LIMIT="${LIMIT:-}" \
+      -e GEMINI_MODEL="${GEMINI_MODEL:-}" \
+      -e GEMINI_BATCH_SIZE="${GEMINI_BATCH_SIZE:-}" \
+      -e MAX_THEMES="${MAX_THEMES:-}" \
+      -v "$SCRIPT_DIR/backend/src:/app/src" \
+      -v "$SCRIPT_DIR/data:/app/data" \
+      "${MEM_ARGS[@]}" \
+      "$IMAGE_NAME" python -m src.classify_themes ${THEMES_ARGS:-}
+    ;;
+
   xbrl-daily)
     # CI (GitHub Actions) から叩く用。detached で起動して外からポーリングで待つ。
     #
@@ -436,7 +470,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "Usage: $0 {build|listed|calendar|calendar-diff|edinet-codes|edinet-docs|edinet-docs-bg|edinet-docs-diff|xbrl|xbrl-bg|prices|prices-bg|prices-diff|prices-one|backtest|notify|shell|web-init|web|web-rebuild|web-logs|web-stop}"
+    echo "Usage: $0 {build|listed|calendar|calendar-diff|edinet-codes|edinet-docs|edinet-docs-bg|edinet-docs-diff|xbrl|xbrl-bg|xbrl-daily|themes-seed|themes|prices|prices-bg|prices-diff|prices-one|backtest|notify|shell|web-init|web|web-rebuild|web-logs|web-stop}"
     echo ""
     echo "  build              Build backend image (Python worker)"
     echo "  listed             Fetch listed companies master"
@@ -448,6 +482,10 @@ case "${1:-}" in
     echo "  edinet-docs-diff   Fetch EDINET 提出書類メタ (DB 最新以降のみ)"
     echo "  xbrl               Parse EDINET XBRL → financial_facts (parsed_at NULL 全件、foreground)"
     echo "  xbrl-bg            Same but detached"
+    echo "  xbrl-daily         Same but detached + polling wait (CI 用)"
+    echo "  themes-seed        Seed theme taxonomy (sql/themes_seed.sql → themes table, idempotent)"
+    echo "  themes             Classify listed stocks into themes via Gemini API (差分実行)"
+    echo "                     LIMIT=40 ./run.sh themes で smoke test / THEMES_ARGS=--refresh で全再分類"
     echo "  prices             Fetch daily prices (full, default 5 years / Light plan, foreground)"
     echo "  prices-bg          Fetch daily prices (full, detached / SSH切断耐性)"
     echo "  prices-diff        Fetch daily prices (only new dates)"
