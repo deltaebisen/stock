@@ -272,3 +272,65 @@ CREATE TABLE IF NOT EXISTS backtest_equity (
   PRIMARY KEY (run_id, trade_date),
   FOREIGN KEY (run_id) REFERENCES backtest_runs(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- テーマ分類 (半導体 / AI / 防衛 …)
+--
+-- J-Quants にも EDINET にもテーマ分類は無いので自前で持つ。
+--   themes        … テーマ定義。**このテーブルがソースオブトゥルース**。
+--                    初期投入は sql/themes_seed.sql (`./run.sh themes-seed`、冪等)。
+--                    追加・文言修正・廃止 (is_active=0) は直接 UPDATE でもよい
+--   theme_members … 銘柄への割当。Gemini API に分類させた結果 (src/classify_themes.py)
+--
+-- description はそのまま LLM のプロンプトに入る = 分類の判断基準になるので、
+-- 「何を含めて何を含めないか」を具体的に書くこと。
+--
+-- taxonomy_version は themes の MAX(updated_at) 由来。定義をいじると版が上がり、
+-- 次回の分類バッチが自動的に全銘柄を再分類する。
+-- 1 銘柄が複数テーマに属する多対多 (最大 3)。等ウェイト平均は各テーマ独立に計算するので
+-- 多重所属で破綻しない (市場平均の母集団は全上場銘柄のままにすること)。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS themes (
+  theme_code VARCHAR(50) PRIMARY KEY,        -- 'semiconductor' 等の安定キー。RS の時系列はこれで繋ぐ
+  theme_name VARCHAR(100) NOT NULL,          -- 画面表示名 (例: 半導体)
+  description VARCHAR(500) NOT NULL,         -- 分類基準。LLM にそのまま渡す
+  sort_order INT NOT NULL DEFAULT 0,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,   -- 0 で分類対象・画面から外す (行は残す)
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_active (is_active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS theme_members (
+  code VARCHAR(10) NOT NULL,                 -- listed_info.code (4桁)
+  theme_code VARCHAR(50) NOT NULL,
+  confidence DECIMAL(4,3),                   -- LLM が返す確信度 0.000-1.000
+  taxonomy_version VARCHAR(20) NOT NULL,     -- 分類時点の themes 定義版
+  model VARCHAR(50),                         -- 使用モデル名
+  assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (code, theme_code),
+  INDEX idx_theme (theme_code),
+  INDEX idx_version (taxonomy_version)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============================================================
+-- テーマ分類の台帳 (parse_xbrl の parsed_at と同じ役割)
+--
+-- theme_members だけだと「分類した結果どのテーマにも該当しなかった銘柄」を
+-- 記録できず、毎回 LLM に投げ直すことになる。銘柄ごとに 1 行持って、
+-- 差分実行 / 失敗リトライ / 再分類の判定をこのテーブルだけで決める。
+--
+-- 対象抽出は「台帳に無い or error が残っている or taxonomy_version が古い or
+-- 入力 (社名・業種) が変わった」の 4 条件の OR。
+-- listed_info への FK は張らない (fetch_listed が毎日 TRUNCATE するため)。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS theme_classification (
+  code VARCHAR(10) PRIMARY KEY,
+  taxonomy_version VARCHAR(20) NOT NULL,     -- 分類時点の themes 定義版
+  model VARCHAR(50) NOT NULL,
+  input_fingerprint CHAR(40) NOT NULL,       -- SHA1(社名|33業種|市場)。社名変更等で再分類する
+  n_themes TINYINT NOT NULL DEFAULT 0,       -- 付いたテーマ数 (0 = 該当なしという正常結果)
+  error TEXT NULL,                           -- NULL 以外なら次回自動リトライ
+  classified_at TIMESTAMP NULL,
+  INDEX idx_version (taxonomy_version),
+  INDEX idx_error (error(64))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
