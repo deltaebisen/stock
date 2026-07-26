@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getListed, getQuotes, getStockSummary } from "@/lib/queries";
+import { getThemesForCodes } from "@/lib/themes";
 import { changePct, fmtNumber, fmtPercent, fmtPrice } from "@/lib/format";
 import PriceChart from "./PriceChart";
 
@@ -14,11 +15,14 @@ export default async function StockDetailPage({
   const { code } = await params;
   if (!/^[0-9A-Z]{4}$/.test(code)) notFound();
 
-  const [listed, quotes, summary] = await Promise.all([
+  const [listed, quotes, summary, themeMap] = await Promise.all([
     getListed(code),
     getQuotes(code),
     getStockSummary(code),
+    getThemesForCodes([code]),
   ]);
+  // 確信度の高い順。1 銘柄が複数テーマに属する
+  const themes = themeMap.get(code) ?? [];
 
   if (!listed) notFound();
 
@@ -42,6 +46,29 @@ export default async function StockDetailPage({
             {listed.sector17_name && <span className="tag">{listed.sector17_name}</span>}
             {listed.scale_category && <span className="tag">{listed.scale_category}</span>}
           </div>
+        </div>
+
+        <div className="theme-tags">
+          <span className="label">テーマ</span>
+          {themes.length === 0 ? (
+            <span className="muted" style={{ fontSize: 12 }}>
+              未分類 (週次のテーマ分類バッチが拾います)
+            </span>
+          ) : (
+            themes.map((t) => (
+              <Link
+                key={t.theme_code}
+                href={`/themes/${encodeURIComponent(t.theme_code)}`}
+                className="tag theme"
+                title={`確信度 ${t.confidence.toFixed(2)}`}
+              >
+                {t.theme_name}
+                <span className="muted mono" style={{ marginLeft: 6, fontSize: 11 }}>
+                  {t.confidence.toFixed(1)}
+                </span>
+              </Link>
+            ))
+          )}
         </div>
 
         <div className="metric-row">

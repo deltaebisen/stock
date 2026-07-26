@@ -265,6 +265,32 @@ table.data tbody tr:last-child td {
   color: var(--text-muted);
 }
 
+/* 銘柄詳細のテーマタグ */
+.theme-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0 0 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-muted);
+}
+.theme-tags .label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 2px;
+}
+.tag.theme {
+  color: var(--accent);
+  border-color: var(--border);
+}
+.tag.theme:hover {
+  background: var(--bg-hover);
+  text-decoration: none;
+}
+
 .metric-row {
   display: flex;
   gap: 24px;
