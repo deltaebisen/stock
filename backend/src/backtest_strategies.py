@@ -428,15 +428,22 @@ class OsgfSwingStrategy(OneSidedGaussianFilterStrategy):
 
     エントリー:
       1. OSGF のロングシグナル点灯 (out の上向き転換 + 200MA 上向き) で「待機」に入る
-      2. 待機中に安値が OSGF ライン (out) にタッチしたバーで、そのライン価格で買う
-         (寄り付きが既にラインより下ならギャップとみなして寄り値で約定)
+      2. 点灯から `arm_max_bars` 営業日以内に安値が OSGF ライン (out) にタッチしたバーで、
+         そのライン価格で買う (寄り付きが既にラインより下ならギャップとみなして寄り値で約定)。
+         期限内にタッチしなければ待機は失効する
 
     SL:
-      1. エントリー時の `out - ATR*sl_mult` に逆指値 (以後は固定)
-      2. 終値が `out + ATR*be_mult` を上抜けたら、逆指値をエントリー値 (建値) に引き上げ
+      - エントリー時の `out - ATR*sl_mult` に逆指値 (以後は固定)
+      - `be_mult > 0` を指定した場合のみ、終値が `out + ATR*be_mult` を上抜けた時点で
+        逆指値をエントリー値 (建値) に引き上げる。既定は 0 = 建値移動なし
 
     TP:
-      - 毎日 `out + ATR*tp_mult` に更新する指値
+      - 毎日 `out + ATR*tp_mult` に更新する指値。`tp_mult <= 0` で TP 無し
+
+    トレーリング (`trail=True`):
+      - 毎日 `stop = max(stop, out - ATR*sl_mult)` で逆指値を引き上げる (下げない)。
+        `tp_mult=0` と組めば「利食い目標は置かず、OSGF ラインに追従する逆指値だけで
+        引っ張る」運用になる
 
     ルールに書かれていない部分の解釈 (すべて params で変更可):
       - 点灯当日はエントリーしない (「1 のあとに」を素直に読んで翌バー以降のタッチを待つ)
@@ -446,9 +453,12 @@ class OsgfSwingStrategy(OneSidedGaussianFilterStrategy):
       - エントリーしたバーでは SL/TP 判定をしない (翌バーから)
 
     params (osgf のものに加えて):
-      sl_mult : 逆指値の ATR 乗数 (default 1.0)
-      tp_mult : 指値の ATR 乗数 (default 2.5)
-      be_mult : 建値移動のトリガーとなる上側ラインの ATR 乗数 (default 1.0)
+      sl_mult      : 逆指値の ATR 乗数 (default 1.0)
+      tp_mult      : 指値の ATR 乗数 (default 2.5)。0 以下で TP 無し
+      trail        : True で逆指値を毎日 `out - ATR*sl_mult` へ引き上げる (default False)
+      be_mult      : 建値移動のトリガーとなる上側ラインの ATR 乗数 (default 0 = 無効)
+      arm_max_bars : 点灯から何営業日以内のタッチを拾うか (default 15、0 で無期限)。
+                     点灯バーを 0 として、そこから数えて arm_max_bars 本目までを有効とする
 
     注意: この戦略はエンジンと独立に「約定した前提」で状態遷移するので、資金不足で
     エンジンがエントリーを見送ると以降の SL/TP シグナルが空振りする (エンジン側は
@@ -474,6 +484,8 @@ class OsgfSwingStrategy(OneSidedGaussianFilterStrategy):
         sl_mult = float(self.params["sl_mult"])
         tp_mult = float(self.params["tp_mult"])
         be_mult = float(self.params["be_mult"])
+        arm_max_bars = int(self.params["arm_max_bars"])
+        trail = bool(self.params["trail"])
 
         n = len(df)
         signal = np.zeros(n, dtype=int)
@@ -482,6 +494,7 @@ class OsgfSwingStrategy(OneSidedGaussianFilterStrategy):
 
         start = self.required_warmup()  # 立ち上がり区間は状態遷移させない
         armed = False
+        armed_bar = -1  # 点灯したバーの位置 (期限判定用)
         in_pos = False
         entry = stop = tp = math.nan
         be_done = False
@@ -517,14 +530,22 @@ class OsgfSwingStrategy(OneSidedGaussianFilterStrategy):
                     continue
 
                 if valid:
-                    tp = line + a * tp_mult  # TP は毎日更新
-                    if not be_done and c > line + a * be_mult:
+                    if tp_mult > 0:
+                        tp = line + a * tp_mult  # TP は毎日更新
+                    if trail:
+                        # 逆指値を OSGF ラインに追従させる (引き上げのみ)
+                        stop = max(stop, line - a * sl_mult)
+                    if be_mult > 0 and not be_done and c > line + a * be_mult:
                         stop = entry  # 建値に引き上げ
                         be_done = True
                 continue
 
             # ノーポジ
             if base.iloc[t] == -1:
+                armed = False
+
+            # 点灯から arm_max_bars 営業日を過ぎたら待機を失効させる
+            if armed and arm_max_bars > 0 and (t - armed_bar) > arm_max_bars:
                 armed = False
 
             if armed and valid and l <= line:
@@ -536,13 +557,15 @@ class OsgfSwingStrategy(OneSidedGaussianFilterStrategy):
                     in_pos = True
                     entry = fill
                     stop = line - a * sl_mult
-                    tp = line + a * tp_mult
+                    tp = line + a * tp_mult if tp_mult > 0 else math.inf
                     be_done = False
                     armed = False
                     continue
 
             if base.iloc[t] == 1:
-                armed = True  # 点灯当日は買わず、翌バー以降のタッチを待つ
+                # 点灯当日は買わず、翌バー以降のタッチを待つ (期限は arm_max_bars 本)
+                armed = True
+                armed_bar = t
 
         plan = pd.DataFrame(
             {"signal": signal, "price": price, "reason": reason}, index=df.index
@@ -588,7 +611,9 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "trend_filter": True,
         "sl_mult": 1.0,
         "tp_mult": 2.5,
-        "be_mult": 1.0,
+        "be_mult": 0.0,  # 建値移動なし (ルールから削除された)
+        "arm_max_bars": 15,
+        "trail": False,
     },
 }
 
