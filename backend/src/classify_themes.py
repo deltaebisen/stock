@@ -37,7 +37,7 @@ from typing import Any
 from sqlalchemy import text
 
 from .db import get_engine
-from .gemini_client import GeminiClient, GeminiError, GeminiResponseError
+from .gemini_client import GeminiClient, GeminiError, GeminiQuotaError, GeminiResponseError
 
 ETF_SECTOR33_CODE = "9999"
 
@@ -214,6 +214,9 @@ def classify_batch(
             build_system_instruction(themes, max_themes),
             build_user_text(batch),
             build_schema(theme_codes, max_themes),
+            # 1 銘柄あたり ~40 トークン。バッチを大きくしたら上限も上げないと
+            # MAX_TOKENS で切れる
+            max_output_tokens=min(60000, max(4096, len(batch) * 80)),
         )
     except GeminiResponseError:
         if len(batch) <= 1:
@@ -380,6 +383,13 @@ def main(argv: list[str] | None = None) -> int:
         total_batches = (len(targets) + batch_size - 1) // batch_size
         try:
             assignments = classify_batch(client, batch, themes, max_themes)
+        except GeminiQuotaError as e:
+            # 待っても当日は回復しないので、残りを未分類のまま残して終了する
+            # (台帳が更新されないので、翌日そのまま再実行すれば続きから進む)
+            remaining = len(targets) - i
+            print(f"[classify_themes] 中断: {e}")
+            print(f"[classify_themes] 未分類 {remaining} 銘柄は次回実行に持ち越し")
+            break
         except (GeminiError, Exception) as e:  # noqa: BLE001 - 1 バッチの失敗で全体を殺さない
             failed += len(batch)
             mark_error(engine, batch, version, client.model, f"{type(e).__name__}: {e}")
