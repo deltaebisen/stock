@@ -26,6 +26,24 @@ export type ListedSearchParams = {
   sector17?: string;
   limit?: number;
   offset?: number;
+  sort?: string;
+  dir?: string;
+};
+
+/**
+ * 一覧の並べ替えキー -> ORDER BY 式。
+ * SQL に文字列を差し込むので、必ずこの辞書に載っているキーだけを使う (SQL injection 対策)。
+ * 前日比は SQL 側で計算した式でソートする (画面の表示値と一致させるため)。
+ */
+const LISTED_SORTS: Record<string, string> = {
+  code: "li.code",
+  name: "li.company_name",
+  market: "li.market_name",
+  sector: "li.sector17_name",
+  scale: "li.scale_category",
+  close: "latest.last_close",
+  change: "(latest.last_close - latest.prev_close) / NULLIF(latest.prev_close, 0)",
+  date: "latest.last_date",
 };
 
 export type ListedSearchResult = {
@@ -57,6 +75,9 @@ export async function searchListed(
 
   const limit = Math.min(Math.max(params.limit ?? 50, 1), 200);
   const offset = Math.max(params.offset ?? 0, 0);
+
+  const orderExpr = LISTED_SORTS[params.sort ?? "code"] ?? LISTED_SORTS.code;
+  const dir = params.dir?.toLowerCase() === "desc" ? "DESC" : "ASC";
 
   // 最新の close と、その前営業日の close をサブクエリで取得 (騰落率計算用)
   const rows = await query<ListedRowWithLatest>(
@@ -90,7 +111,7 @@ export async function searchListed(
       GROUP BY code
     ) latest ON latest.code = li.code
     ${whereSql}
-    ORDER BY li.code ASC
+    ORDER BY (${orderExpr}) IS NULL, ${orderExpr} ${dir}${orderExpr === "li.code" ? "" : ", li.code ASC"}
     LIMIT ${limit} OFFSET ${offset}
     `,
     args,

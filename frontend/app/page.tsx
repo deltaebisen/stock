@@ -9,7 +9,21 @@ type SearchParams = {
   market?: string;
   sector17?: string;
   page?: string;
+  sort?: string;
+  dir?: string;
 };
+
+/** 並べ替え可能な列 (キーは lib/queries.ts の LISTED_SORTS と対応) */
+const COLUMNS: { key: string; label: string; num?: boolean }[] = [
+  { key: "code", label: "コード" },
+  { key: "name", label: "銘柄名" },
+  { key: "market", label: "市場" },
+  { key: "sector", label: "業種" },
+  { key: "scale", label: "規模" },
+  { key: "close", label: "終値", num: true },
+  { key: "change", label: "前日比", num: true },
+  { key: "date", label: "最終日" },
+];
 
 const PAGE_SIZE = 50;
 
@@ -28,6 +42,8 @@ export default async function HomePage({
       q: sp.q?.trim() || undefined,
       market: sp.market || undefined,
       sector17: sp.sector17 || undefined,
+      sort: sp.sort,
+      dir: sp.dir,
       limit: PAGE_SIZE,
       offset,
     }),
@@ -75,14 +91,9 @@ export default async function HomePage({
         <table className="data">
           <thead>
             <tr>
-              <th>コード</th>
-              <th>銘柄名</th>
-              <th>市場</th>
-              <th>業種</th>
-              <th>規模</th>
-              <th className="num">終値</th>
-              <th className="num">前日比</th>
-              <th>最終日</th>
+              {COLUMNS.map((c) => (
+                <SortHeader key={c.key} col={c} sp={sp} />
+              ))}
             </tr>
           </thead>
           <tbody>
@@ -138,6 +149,40 @@ export default async function HomePage({
   );
 }
 
+/** ヘッダークリックで並べ替え。同じ列を再度押すと昇順 <-> 降順 */
+function SortHeader({
+  col,
+  sp,
+}: {
+  col: { key: string; label: string; num?: boolean };
+  sp: SearchParams;
+}) {
+  const current = sp.sort ?? "code";
+  const dir = sp.dir === "desc" ? "desc" : "asc";
+  const active = current === col.key;
+  // 数値列は最初に押したとき降順のほうが自然 (高い順に見たい)
+  const nextDir = active ? (dir === "asc" ? "desc" : "asc") : col.num ? "desc" : "asc";
+
+  const params = new URLSearchParams();
+  if (sp.q) params.set("q", sp.q);
+  if (sp.market) params.set("market", sp.market);
+  if (sp.sector17) params.set("sector17", sp.sector17);
+  params.set("sort", col.key);
+  params.set("dir", nextDir);
+
+  return (
+    <th className={col.num ? "num" : undefined}>
+      <Link
+        href={`/?${params.toString()}`}
+        style={{ color: active ? "var(--accent)" : "inherit" }}
+      >
+        {col.label}
+        {active ? (dir === "asc" ? " ▲" : " ▼") : ""}
+      </Link>
+    </th>
+  );
+}
+
 function PageLink({
   sp,
   page,
@@ -160,6 +205,8 @@ function PageLink({
   if (sp.q) params.set("q", sp.q);
   if (sp.market) params.set("market", sp.market);
   if (sp.sector17) params.set("sector17", sp.sector17);
+  if (sp.sort) params.set("sort", sp.sort);
+  if (sp.dir) params.set("dir", sp.dir);
   if (page > 1) params.set("page", String(page));
   const qs = params.toString();
   return (
