@@ -4,7 +4,14 @@ import { fmtPercent } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
-type SearchParams = { level?: string; bars?: string; sectors?: string };
+type SearchParams = { level?: string; bars?: string; sectors?: string; sort?: string };
+
+/** 並べ替えキー。既定は先週差 (直近の勢いの変化を見たいケースが多いので) */
+const SORTS = {
+  week: { label: "先週差", pick: (s: { rsChangeWeek: number }) => s.rsChangeWeek },
+  period: { label: "期間 RS 変化率", pick: (s: { rsChange: number }) => s.rsChange },
+} as const;
+type SortKey = keyof typeof SORTS;
 
 const RANGES = [
   { bars: 60, label: "3ヶ月" },
@@ -26,10 +33,13 @@ export default async function SectorRsPage({
   const sp = await searchParams;
   const level = sp.level === "sector17" ? "sector17" : "sector33";
   const bars = RANGES.some((r) => String(r.bars) === sp.bars) ? Number(sp.bars) : 120;
+  const sort: SortKey = sp.sort === "period" ? "period" : "week";
 
-  const { asOf, series } = await getSectorRelativeStrength(bars, level);
+  const { asOf, series: raw } = await getSectorRelativeStrength(bars, level);
+  const series = [...raw].sort((a, b) => SORTS[sort].pick(b) - SORTS[sort].pick(a));
+  const weekAgoDate = series[0]?.weekAgoDate ?? null;
 
-  // 既定は RS 変化率の上位 5 / 下位 5。sectors= で明示指定も可
+  // 既定は並べ替えキーの上位 5 / 下位 5。sectors= で明示指定も可
   const picked = sp.sectors
     ? sp.sectors.split(",").filter(Boolean)
     : [...series.slice(0, 5), ...series.slice(-5)].map((s) => s.sector_code);
@@ -64,7 +74,7 @@ export default async function SectorRsPage({
         {RANGES.map((r) => (
           <Link
             key={r.bars}
-            href={`/sectors/rs?level=${level}&bars=${r.bars}`}
+            href={`/sectors/rs?level=${level}&bars=${r.bars}&sort=${sort}`}
             className={`btn ${bars === r.bars ? "active" : ""}`}
           >
             {r.label}
@@ -77,7 +87,10 @@ export default async function SectorRsPage({
 
       <p className="muted" style={{ margin: "0 0 12px" }}>
         業種等ウェイト指数 ÷ 全銘柄等ウェイト指数 (期間開始 = 100)。
-        100 より上 = 市場平均をアウトパフォーム。既定表示は RS 変化率の上位 5 / 下位 5。
+        100 より上 = 市場平均をアウトパフォーム。既定表示は並べ替えキーの上位 5 / 下位 5。
+        <br />
+        <strong>先週差</strong>は 5 営業日前 ({weekAgoDate ?? "—"}) と比べた RS の変化率で、
+        直近 1 週間でどの業種に資金が回ってきたかを見るための列。
       </p>
 
       <div className="card" style={{ padding: 12, marginBottom: 16, overflowX: "auto" }}>
@@ -159,7 +172,24 @@ export default async function SectorRsPage({
           <thead>
             <tr>
               <th>業種</th>
-              <th className="num">RS 変化率</th>
+              <th className="num">
+                <Link
+                  href={`/sectors/rs?level=${level}&bars=${bars}&sort=week`}
+                  style={{ color: sort === "week" ? "var(--accent)" : "inherit" }}
+                >
+                  先週差 (RS)
+                </Link>
+              </th>
+              <th className="num">先週比リターン</th>
+              <th className="num">対市場 超過</th>
+              <th className="num">
+                <Link
+                  href={`/sectors/rs?level=${level}&bars=${bars}&sort=period`}
+                  style={{ color: sort === "period" ? "var(--accent)" : "inherit" }}
+                >
+                  期間 RS 変化率
+                </Link>
+              </th>
               <th className="num">期間リターン</th>
               <th className="num">RS (現在)</th>
               <th>表示</th>
@@ -179,6 +209,15 @@ export default async function SectorRsPage({
                       {s.sector_name}
                     </Link>
                   </td>
+                  <td className={`num mono ${s.rsChangeWeek > 0 ? "pos" : "neg"}`}>
+                    <strong>{fmtPercent(s.rsChangeWeek)}</strong>
+                  </td>
+                  <td className={`num mono ${s.retWeek > 0 ? "pos" : "neg"}`}>
+                    {fmtPercent(s.retWeek)}
+                  </td>
+                  <td className={`num mono ${s.excessWeek > 0 ? "pos" : "neg"}`}>
+                    {fmtPercent(s.excessWeek)}
+                  </td>
                   <td className={`num mono ${s.rsChange > 0 ? "pos" : "neg"}`}>
                     {fmtPercent(s.rsChange)}
                   </td>
@@ -186,7 +225,7 @@ export default async function SectorRsPage({
                   <td className="num mono">{(s.rs[s.rs.length - 1] ?? 100).toFixed(1)}</td>
                   <td>
                     <Link
-                      href={`/sectors/rs?level=${level}&bars=${bars}&sectors=${next.join(",")}`}
+                      href={`/sectors/rs?level=${level}&bars=${bars}&sort=${sort}&sectors=${next.join(",")}`}
                       className="btn"
                     >
                       {on ? "隠す" : "出す"}

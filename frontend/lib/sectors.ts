@@ -198,6 +198,14 @@ export type RsSeries = {
   rs: number[];
   /** 期間の RS 変化率 (%) */
   rsChange: number;
+  /** 先週 (5 営業日前) 比の RS 変化率 (%)。データが足りなければ 0 */
+  rsChangeWeek: number;
+  /** 先週比の業種リターン (%) */
+  retWeek: number;
+  /** 先週比の対市場超過リターン (%) = 業種リターン - 市場平均リターン */
+  excessWeek: number;
+  /** 比較に使った先週の日付 */
+  weekAgoDate: string | null;
 };
 
 /**
@@ -232,6 +240,12 @@ async function computeSectorRelativeStrength(
   const anchors: string[] = [];
   for (let i = dates.length - 1; i >= 0; i -= step) anchors.push(dates[i]);
   if (anchors[anchors.length - 1] !== asOf) anchors.push(asOf);
+  // 「先週」= 5 営業日前。step で刻んだアンカーに必ずしも乗らないので明示的に足す
+  const weekAgoDate = dates[Math.min(5, dates.length - 1)] ?? null;
+  if (weekAgoDate && !anchors.includes(weekAgoDate)) {
+    anchors.push(weekAgoDate);
+    anchors.sort();
+  }
   const from = anchors[0];
 
   const [closes, splits, listed] = await Promise.all([
@@ -306,6 +320,12 @@ async function computeSectorRelativeStrength(
     marketCounts[i] > 0 ? (marketSums[i] / marketCounts[i]) * 100 : 100,
   );
 
+  const wIdx = weekAgoDate ? anchors.indexOf(weekAgoDate) : -1;
+  const marketWeek =
+    wIdx >= 0 && marketIndex[wIdx]
+      ? (marketIndex[marketIndex.length - 1] / marketIndex[wIdx] - 1) * 100
+      : 0;
+
   const series: RsSeries[] = [...bySector.entries()]
     .filter(([, acc]) => acc.counts[acc.counts.length - 1] > 0)
     .map(([code, acc]) => {
@@ -313,6 +333,10 @@ async function computeSectorRelativeStrength(
       const rs = index.map((v, i) => (v / (marketIndex[i] || 100)) * 100);
       const first = rs[0] ?? 100;
       const last = rs[rs.length - 1] ?? 100;
+      const rsWeekAgo = wIdx >= 0 ? rs[wIdx] : last;
+      const idxWeekAgo = wIdx >= 0 ? index[wIdx] : index[index.length - 1];
+      const retWeek =
+        idxWeekAgo > 0 ? (index[index.length - 1] / idxWeekAgo - 1) * 100 : 0;
       return {
         sector_code: code,
         sector_name: acc.name,
@@ -320,10 +344,14 @@ async function computeSectorRelativeStrength(
         index,
         rs,
         rsChange: ((last - first) / first) * 100,
+        rsChangeWeek: rsWeekAgo > 0 ? ((last - rsWeekAgo) / rsWeekAgo) * 100 : 0,
+        retWeek,
+        excessWeek: retWeek - marketWeek,
+        weekAgoDate,
       };
     });
 
-  series.sort((a, b) => b.rsChange - a.rsChange);
+  series.sort((a, b) => b.rsChangeWeek - a.rsChangeWeek);
   return { asOf, series };
 }
 
