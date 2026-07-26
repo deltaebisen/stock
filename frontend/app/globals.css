@@ -111,6 +111,22 @@ code, .mono {
 
 .topbar .spacer { flex: 1; }
 
+.nav {
+  display: flex;
+  gap: 4px;
+}
+.nav a {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+}
+.nav a:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+  text-decoration: none;
+}
+
 .crumb {
   color: var(--text-muted);
   font-size: 13px;

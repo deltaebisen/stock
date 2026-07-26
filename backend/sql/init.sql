@@ -68,7 +68,11 @@ CREATE TABLE IF NOT EXISTS daily_quotes (
   adjustment_close DECIMAL(12,2),
   adjustment_volume BIGINT,
   PRIMARY KEY (code, trade_date),
-  INDEX idx_date (trade_date)
+  INDEX idx_date (trade_date),
+  -- 日付レンジで全銘柄を舐める用途 (frontend の業種別リターン / 相対強度) のカバリング
+  -- インデックス。idx_date だけだと PK へのランダムアクセスが発生し、1 年ぶんのスキャンに
+  -- 90 秒かかっていた (5.4M 行 / NAS)。close と adjustment_factor まで載せて index-only にする
+  INDEX idx_date_code_px (trade_date, code, close, adjustment_factor)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============================================================

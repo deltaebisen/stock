@@ -18,6 +18,11 @@ export default function RootLayout({
             <div className="brand">
               <Link href="/">📈 Stock Research</Link>
             </div>
+            <nav className="nav">
+              <Link href="/">銘柄一覧</Link>
+              <Link href="/sectors">業種ヒートマップ</Link>
+              <Link href="/sectors/rs">相対強度</Link>
+            </nav>
             <span className="spacer" />
             <span className="crumb mono">J-Quants V2 / local</span>
           </header>
