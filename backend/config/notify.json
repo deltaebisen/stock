@@ -15,7 +15,7 @@
 
   "params": {
     "osgf_buy": {
-      "smthper": 21,
+      "smthper": 25,
       "extrasmthper": 15,
       "atrper": 21,
       "mult": 2.5,
@@ -25,7 +25,7 @@
       "trend_filter": true
     },
     "osgf_sell": {
-      "smthper": 21,
+      "smthper": 25,
       "extrasmthper": 15,
       "atrper": 21,
       "mult": 2.5,

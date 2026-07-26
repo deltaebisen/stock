@@ -598,10 +598,10 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
         "trend_slope": 1,
         "trend_filter": True,
     },
-    # notify.json の実運用値 (smthper=21 / extrasmthper=15) + osgf_rule.md の
+    # notify.json の実運用値 (smthper=25 / extrasmthper=15) + osgf_rule.md の
     # SL/TP 乗数。mult は可視化用チャンネルなので tp_mult と揃えてある
     "osgf_swing": {
-        "smthper": 21,
+        "smthper": 25,
         "extrasmthper": 15,
         "atrper": 21,
         "mult": 2.5,
