@@ -2,19 +2,11 @@ import Link from "next/link";
 import { getSectorReturns, PERIODS } from "@/lib/sectors";
 import { fmtPercent } from "@/lib/format";
 import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
+import { heatStyle } from "@/app/_components/heat";
 
 export const dynamic = "force-dynamic";
 
 type SearchParams = { level?: string; sort?: string; dir?: string };
-
-/** リターン % → セル背景色。±5% で飽和させる */
-function heatStyle(v: number | null): React.CSSProperties {
-  if (v === null || Number.isNaN(v)) return {};
-  const t = Math.max(-1, Math.min(1, v / 5));
-  const alpha = Math.abs(t) * 0.55;
-  const color = t >= 0 ? "63, 185, 80" : "248, 81, 73";
-  return { background: `rgba(${color}, ${alpha.toFixed(3)})` };
-}
 
 export default async function SectorsPage({
   searchParams,
