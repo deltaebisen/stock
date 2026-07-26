@@ -6,11 +6,10 @@ import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
 export const dynamic = "force-dynamic";
 
 const RANGES = [
-  { bars: 5, label: "1週" },
   { bars: 20, label: "1ヶ月" },
   { bars: 60, label: "3ヶ月" },
   { bars: 120, label: "6ヶ月" },
-  { bars: 240, label: "1年" },
+  { bars: 240, label: "12ヶ月" },
 ];
 
 export default async function SectorDetailPage({

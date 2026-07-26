@@ -43,11 +43,21 @@ class GeminiQuotaError(GeminiError):
 
 def _quota_info(r: requests.Response) -> dict[str, Any]:
     """429 レスポンスから「日次かどうか」と retryDelay を取り出す。"""
-    out: dict[str, Any] = {"per_day": False, "value": None, "retry_after": None}
+    out: dict[str, Any] = {
+        "per_day": False,
+        "value": None,
+        "retry_after": None,
+        "depleted": False,
+    }
     try:
-        details = r.json().get("error", {}).get("details", [])
+        err = r.json().get("error", {})
     except ValueError:
         return out
+    # 前払いクレジット切れは details を持たず message だけで来る
+    if "credits are depleted" in (err.get("message") or ""):
+        out["depleted"] = True
+        return out
+    details = err.get("details", [])
     for d in details:
         t = d.get("@type", "")
         if t.endswith("QuotaFailure"):
@@ -105,6 +115,12 @@ class GeminiClient:
         )
         if r.status_code == 429:
             info = _quota_info(r)
+            if info["depleted"]:
+                # 前払いクレジット切れ。残高を足すまで何度投げても同じ
+                raise GeminiQuotaError(
+                    "前払いクレジットが尽きています。"
+                    "https://ai.studio/projects で残高を追加してください"
+                )
             if info["per_day"]:
                 # 日次クォータは待っても当日は回復しない
                 raise GeminiQuotaError(

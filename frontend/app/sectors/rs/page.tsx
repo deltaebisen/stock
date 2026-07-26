@@ -15,9 +15,10 @@ type SearchParams = {
 };
 
 const RANGES = [
+  { bars: 20, label: "1ヶ月" },
   { bars: 60, label: "3ヶ月" },
   { bars: 120, label: "6ヶ月" },
-  { bars: 240, label: "1年" },
+  { bars: 240, label: "12ヶ月" },
 ];
 
 export default async function SectorRsPage({
@@ -27,7 +28,7 @@ export default async function SectorRsPage({
 }) {
   const sp = await searchParams;
   const level = sp.level === "sector17" ? "sector17" : "sector33";
-  const bars = RANGES.some((r) => String(r.bars) === sp.bars) ? Number(sp.bars) : 120;
+  const bars = RANGES.some((r) => String(r.bars) === sp.bars) ? Number(sp.bars) : 60;
   const { asOf, series: raw } = await getSectorRelativeStrength(bars, level);
 
   type Row = (typeof raw)[number];

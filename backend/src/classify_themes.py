@@ -50,14 +50,16 @@ def fetch_taxonomy(engine) -> tuple[list[dict], str]:
     with engine.connect() as conn:
         rows = conn.execute(
             text(
-                "SELECT theme_code, theme_name, description FROM themes "
+                "SELECT theme_code, theme_name, description, category FROM themes "
                 "WHERE is_active = 1 ORDER BY sort_order, theme_code"
             )
         ).fetchall()
         version = conn.execute(
             text("SELECT DATE_FORMAT(MAX(updated_at), '%Y%m%d%H%i') FROM themes WHERE is_active = 1")
         ).scalar()
-    themes = [{"code": r[0], "name": r[1], "description": r[2]} for r in rows]
+    themes = [
+        {"code": r[0], "name": r[1], "description": r[2], "category": r[3] or ""} for r in rows
+    ]
     return themes, (version or "0")
 
 
@@ -122,7 +124,14 @@ def build_system_instruction(themes: list[dict], max_themes: int) -> str:
         "",
         "# テーマ一覧",
     ]
+    # 大分類ごとに並べて出す (テーマ数が多いので、まず大分類で当たりを付けさせる)
+    cur = None
     for t in themes:
+        cat = t.get("category") or ""
+        if cat != cur:
+            lines.append("")
+            lines.append(f"## {cat}")
+            cur = cat
         lines.append(f"- {t['code']} ({t['name']}): {t['description']}")
     cap = (
         f"- 1 銘柄につき最大 {max_themes} 個まで。該当するものから順に付ける"
@@ -153,6 +162,8 @@ def build_system_instruction(themes: list[dict], max_themes: int) -> str:
         "  一度確認し、該当するものがあれば併せて付ける",
         "- 多くの企業は複数のテーマに該当する。単一テーマで確定させる前に、",
         "  取扱製品・供給先・子会社の事業まで考えること",
+        "- テーマは大分類 (## 見出し) ごとに並べてある。まず該当しそうな大分類を選び、",
+        "  その中の具体テーマまで落とすこと。大分類をまたいで複数該当してよい",
         "- confidence は 0.0〜1.0。企業の事業内容を知らない場合は低い値にする",
         "- 入力された全ての銘柄コードについて、必ず 1 件ずつ結果を返す",
     ]
@@ -160,17 +171,26 @@ def build_system_instruction(themes: list[dict], max_themes: int) -> str:
 
 
 def build_schema(theme_codes: list[str], max_themes: int) -> dict[str, Any]:
-    """theme_code を enum で縛る。表記ゆれと存在しないコードの生成を防ぐ。
+    """出力スキーマ。
+
+    theme_code は本来 enum で縛りたいが、テーマが 200 個を超えると Gemini が
+    「enums with too many values」で 400 を返すので、型は STRING にして
+    **コード側で有効なテーマコードと突合**する (classify_batch)。
+    突合で落ちた数はログに出して、プロンプトの劣化を検知できるようにしている。
 
     max_themes=0 (無制限) のときは maxItems を付けない。個数はプロンプト側の
     「売上の 2 割以上を占めるものだけ」という基準だけで抑える。
     """
+    code_prop: dict[str, Any] = {"type": "STRING"}
+    if 0 < len(theme_codes) <= 100:
+        # 100 個以下なら enum で縛れる (表記ゆれとハルシネーションを封じられる)
+        code_prop["enum"] = theme_codes
     themes_prop: dict[str, Any] = {
         "type": "ARRAY",
         "items": {
             "type": "OBJECT",
             "properties": {
-                "theme_code": {"type": "STRING", "enum": theme_codes},
+                "theme_code": code_prop,
                 "confidence": {"type": "NUMBER"},
             },
             "required": ["theme_code", "confidence"],
@@ -239,6 +259,7 @@ def classify_batch(
     valid = set(theme_codes)
     sent = {r["code"] for r in batch}
     out: dict[str, list[dict]] = {}
+    dropped: list[str] = []
     for item in result if isinstance(result, list) else []:
         code = str(item.get("code", "")).strip()
         if code not in sent:
@@ -247,7 +268,10 @@ def classify_batch(
         seen = set()
         for t in item.get("themes") or []:
             tc = str(t.get("theme_code", "")).strip()
-            if tc not in valid or tc in seen:
+            if tc not in valid:
+                dropped.append(tc)
+                continue
+            if tc in seen:
                 continue
             seen.add(tc)
             try:
@@ -256,6 +280,14 @@ def classify_batch(
                 conf = 0.0
             assigned.append({"theme_code": tc, "confidence": max(0.0, min(1.0, conf))})
         out[code] = assigned[:max_themes] if max_themes > 0 else assigned
+
+    if dropped:
+        uniq = sorted(set(dropped))
+        print(
+            f"    存在しない theme_code を {len(dropped)} 件破棄: "
+            + ", ".join(uniq[:5])
+            + (" ..." if len(uniq) > 5 else "")
+        )
     return out
 
 

@@ -6,11 +6,10 @@ import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
 export const dynamic = "force-dynamic";
 
 const RANGES = [
-  { bars: 5, label: "1週" },
   { bars: 20, label: "1ヶ月" },
   { bars: 60, label: "3ヶ月" },
   { bars: 120, label: "6ヶ月" },
-  { bars: 240, label: "1年" },
+  { bars: 240, label: "12ヶ月" },
 ];
 
 export default async function ThemeDetailPage({
@@ -18,15 +17,14 @@ export default async function ThemeDetailPage({
   searchParams,
 }: {
   params: Promise<{ theme: string }>;
-  searchParams: Promise<{ bars?: string; sort?: string; dir?: string; minconf?: string }>;
+  searchParams: Promise<{ bars?: string; sort?: string; dir?: string }>;
 }) {
   const { theme } = await params;
   const sp = await searchParams;
   const themeCode = decodeURIComponent(theme);
   const bars = RANGES.some((r) => String(r.bars) === sp.bars) ? Number(sp.bars) : 20;
-  const minconf = sp.minconf ? Number(sp.minconf) : 0;
 
-  const { asOf, groupName, rows: unsorted } = await getThemeConstituents(themeCode, bars, minconf);
+  const { asOf, groupName, rows: unsorted } = await getThemeConstituents(themeCode, bars);
   // 多対多なので「この銘柄が他にどのテーマに入っているか」も出す
   const otherThemes = await getThemesForCodes(unsorted.map((r) => r.code));
 
@@ -46,7 +44,7 @@ export default async function ThemeDetailPage({
   const rows = [...unsorted].sort(byKey(PICKS[sortKey], dir));
 
   const base = `/themes/${encodeURIComponent(themeCode)}`;
-  const keep = { bars: String(bars), minconf: String(minconf) };
+  const keep = { bars: String(bars) };
 
   const valid = rows.filter((r) => r.ret !== null);
   const avg = valid.length ? valid.reduce((s, r) => s + (r.ret ?? 0), 0) / valid.length : null;
@@ -61,13 +59,13 @@ export default async function ThemeDetailPage({
         {RANGES.map((r) => (
           <Link
             key={r.bars}
-            href={`${base}?bars=${r.bars}&minconf=${minconf}&sort=${sortKey}&dir=${dir}`}
+            href={`${base}?bars=${r.bars}&sort=${sortKey}&dir=${dir}`}
             className={`btn ${bars === r.bars ? "active" : ""}`}
           >
             {r.label}
           </Link>
         ))}
-        <Link href={`/themes?minconf=${minconf}`} className="btn">
+        <Link href={`/themes`} className="btn">
           ← 一覧
         </Link>
       </div>
@@ -141,7 +139,7 @@ export default async function ThemeDetailPage({
                         : others.map((t, i) => (
                             <span key={t.theme_code}>
                               {i > 0 && ", "}
-                              <Link href={`/themes/${encodeURIComponent(t.theme_code)}?minconf=${minconf}`}>
+                              <Link href={`/themes/${encodeURIComponent(t.theme_code)}`}>
                                 {t.theme_name}
                               </Link>
                             </span>

@@ -1,20 +1,14 @@
 import Link from "next/link";
 import { PERIODS } from "@/lib/grouping";
-import { getThemeCoverage, getThemeReturns } from "@/lib/themes";
+import { getThemeCatalog, getThemeCoverage, getThemeReturns } from "@/lib/themes";
 import { fmtNumber, fmtPercent } from "@/lib/format";
 import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
 import { heatStyle } from "@/app/_components/heat";
 
 export const dynamic = "force-dynamic";
 
-type SearchParams = { sort?: string; dir?: string; minconf?: string };
+type SearchParams = { sort?: string; dir?: string; cat?: string };
 
-/** 信頼度の閾値 (Gemini が返した confidence の足切り) */
-const CONF_LEVELS = [
-  { v: 0, label: "全部" },
-  { v: 0.6, label: "0.6 以上" },
-  { v: 0.8, label: "0.8 以上" },
-];
 
 export default async function ThemesPage({
   searchParams,
@@ -22,25 +16,33 @@ export default async function ThemesPage({
   searchParams: Promise<SearchParams>;
 }) {
   const sp = await searchParams;
-  const minconf = CONF_LEVELS.some((c) => String(c.v) === sp.minconf) ? Number(sp.minconf) : 0;
-  const valid = ["name", "count", ...PERIODS.map((p) => p.key)];
+  const valid = ["category", "name", "count", ...PERIODS.map((p) => p.key)];
   const sortKey = valid.includes(sp.sort ?? "") ? sp.sort! : "1m";
   const dir: SortDir = sp.dir === "asc" ? "asc" : "desc";
 
-  const [{ asOf, rows, market }, coverage] = await Promise.all([
-    getThemeReturns(minconf),
+  const [{ asOf, rows: allRows, market }, coverage, catalog] = await Promise.all([
+    getThemeReturns(),
     getThemeCoverage(),
+    getThemeCatalog(),
   ]);
+
+  // 大分類 (2 段階の上位) でフィルタできるようにする。208 テーマあるので必須
+  const catOf = new Map(catalog.map((c) => [c.theme_code, c.category]));
+  const categories = [...new Set(catalog.map((c) => c.category))].filter(Boolean);
+  const cat = categories.includes(sp.cat ?? "") ? sp.cat! : "";
+  const rows = cat ? allRows.filter((r) => catOf.get(r.group_code) === cat) : allRows;
 
   type Row = (typeof rows)[number];
   const pick =
-    sortKey === "name"
+    sortKey === "category"
+      ? (r: Row) => catOf.get(r.group_code) ?? ""
+      : sortKey === "name"
       ? (r: Row) => r.group_name
       : sortKey === "count"
         ? (r: Row) => r.count
         : (r: Row) => r.returns[sortKey];
   const sorted = [...rows].sort(byKey(pick, dir));
-  const keep = { minconf: String(minconf) };
+  const keep = { cat };
 
   return (
     <>
@@ -48,18 +50,27 @@ export default async function ThemesPage({
         <strong>テーマ別リターン</strong>
         <span className="muted mono">基準日 {asOf ?? "—"}</span>
         <span style={{ flex: 1 }} />
-        {CONF_LEVELS.map((c) => (
-          <Link
-            key={c.v}
-            href={`/themes?minconf=${c.v}&sort=${sortKey}&dir=${dir}`}
-            className={`btn ${minconf === c.v ? "active" : ""}`}
-          >
-            確信度 {c.label}
-          </Link>
-        ))}
-        <Link href={`/themes/rs?minconf=${minconf}`} className="btn">
+        <Link href="/themes/rs" className="btn">
           相対強度 →
         </Link>
+      </div>
+
+      <div className="toolbar" style={{ gap: 4 }}>
+        <Link
+          href={`/themes?sort=${sortKey}&dir=${dir}`}
+          className={`btn ${cat === "" ? "active" : ""}`}
+        >
+          すべて
+        </Link>
+        {categories.map((c) => (
+          <Link
+            key={c}
+            href={`/themes?sort=${sortKey}&dir=${dir}&cat=${encodeURIComponent(c)}`}
+            className={`btn ${cat === c ? "active" : ""}`}
+          >
+            {c}
+          </Link>
+        ))}
       </div>
 
       <p className="muted" style={{ margin: "0 0 12px" }}>
@@ -76,6 +87,7 @@ export default async function ThemesPage({
         <table className="data">
           <thead>
             <tr>
+              <SortTh label="大分類" sortKey="category" sort={sortKey} dir={dir} basePath="/themes" keep={keep} />
               <SortTh label="テーマ" sortKey="name" sort={sortKey} dir={dir} basePath="/themes" keep={keep} />
               <SortTh label="銘柄数" sortKey="count" sort={sortKey} dir={dir} basePath="/themes" keep={keep} num />
               {PERIODS.map((p) => (
@@ -94,6 +106,7 @@ export default async function ThemesPage({
           </thead>
           <tbody>
             <tr style={{ borderBottom: "2px solid var(--border)" }}>
+              <td className="muted">—</td>
               <td>
                 <strong>市場平均 (全銘柄等ウェイト)</strong>
               </td>
@@ -109,15 +122,18 @@ export default async function ThemesPage({
             </tr>
             {sorted.length === 0 ? (
               <tr>
-                <td colSpan={PERIODS.length + 2} className="muted" style={{ textAlign: "center", padding: 40 }}>
+                <td colSpan={PERIODS.length + 3} className="muted" style={{ textAlign: "center", padding: 40 }}>
                   テーマの割当がまだありません (分類バッチ未実行)
                 </td>
               </tr>
             ) : (
               sorted.map((r) => (
                 <tr key={r.group_code}>
+                  <td className="muted" style={{ fontSize: 12 }}>
+                    {catOf.get(r.group_code) ?? "—"}
+                  </td>
                   <td>
-                    <Link href={`/themes/${encodeURIComponent(r.group_code)}?minconf=${minconf}`}>
+                    <Link href={`/themes/${encodeURIComponent(r.group_code)}`}>
                       {r.group_name}
                     </Link>
                   </td>

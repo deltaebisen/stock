@@ -46,6 +46,18 @@ export async function getThemeConstituents(themeCode: string, bars = 20, minConf
   );
 }
 
+export type ThemeCatalogRow = { theme_code: string; theme_name: string; category: string };
+
+/** テーマの定義一覧 (大分類つき)。画面のフィルタと列表示に使う */
+export async function getThemeCatalog(): Promise<ThemeCatalogRow[]> {
+  return cached("theme:catalog", () =>
+    query<ThemeCatalogRow>(
+      `SELECT theme_code, theme_name, category FROM themes
+        WHERE is_active = 1 ORDER BY sort_order, theme_code`,
+    ),
+  );
+}
+
 export type ThemeMembership = {
   code: string;
   theme_code: string;

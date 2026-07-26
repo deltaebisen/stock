@@ -293,11 +293,13 @@ CREATE TABLE IF NOT EXISTS backtest_equity (
 CREATE TABLE IF NOT EXISTS themes (
   theme_code VARCHAR(50) PRIMARY KEY,        -- 'semiconductor' 等の安定キー。RS の時系列はこれで繋ぐ
   theme_name VARCHAR(100) NOT NULL,          -- 画面表示名 (例: 半導体)
+  category VARCHAR(50) NOT NULL DEFAULT '',  -- 大分類 (例: AI・半導体)。2 段階の上位
   description VARCHAR(500) NOT NULL,         -- 分類基準。LLM にそのまま渡す
   sort_order INT NOT NULL DEFAULT 0,
   is_active TINYINT(1) NOT NULL DEFAULT 1,   -- 0 で分類対象・画面から外す (行は残す)
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_active (is_active)
+  INDEX idx_active (is_active),
+  INDEX idx_category (category)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS theme_members (
