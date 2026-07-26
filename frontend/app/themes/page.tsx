@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { PERIODS } from "@/lib/grouping";
+import { PERIODS, WEEK_PERIOD } from "@/lib/grouping";
 import { getThemeCatalog, getThemeCoverage, getThemeReturns } from "@/lib/themes";
 import { fmtNumber, fmtPercent } from "@/lib/format";
 import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
@@ -16,7 +16,7 @@ export default async function ThemesPage({
   searchParams: Promise<SearchParams>;
 }) {
   const sp = await searchParams;
-  const valid = ["category", "name", "count", ...PERIODS.map((p) => p.key)];
+  const valid = ["category", "name", "count", WEEK_PERIOD.key, ...PERIODS.map((p) => p.key)];
   const sortKey = valid.includes(sp.sort ?? "") ? sp.sort! : "1m";
   const dir: SortDir = sp.dir === "asc" ? "asc" : "desc";
 
@@ -90,6 +90,15 @@ export default async function ThemesPage({
               <SortTh label="大分類" sortKey="category" sort={sortKey} dir={dir} basePath="/themes" keep={keep} />
               <SortTh label="テーマ" sortKey="name" sort={sortKey} dir={dir} basePath="/themes" keep={keep} />
               <SortTh label="銘柄数" sortKey="count" sort={sortKey} dir={dir} basePath="/themes" keep={keep} num />
+              <SortTh
+                label={WEEK_PERIOD.label}
+                sortKey={WEEK_PERIOD.key}
+                sort={sortKey}
+                dir={dir}
+                basePath="/themes"
+                keep={keep}
+                num
+              />
               {PERIODS.map((p) => (
                 <SortTh
                   key={p.key}
@@ -111,7 +120,7 @@ export default async function ThemesPage({
                 <strong>市場平均 (全銘柄等ウェイト)</strong>
               </td>
               <td className="num muted">—</td>
-              {PERIODS.map((p) => {
+              {[WEEK_PERIOD, ...PERIODS].map((p) => {
                 const v = market[p.key] ?? null;
                 return (
                   <td key={p.key} className={`num mono ${v === null ? "" : v > 0 ? "pos" : "neg"}`}>
@@ -122,7 +131,7 @@ export default async function ThemesPage({
             </tr>
             {sorted.length === 0 ? (
               <tr>
-                <td colSpan={PERIODS.length + 3} className="muted" style={{ textAlign: "center", padding: 40 }}>
+                <td colSpan={PERIODS.length + 4} className="muted" style={{ textAlign: "center", padding: 40 }}>
                   テーマの割当がまだありません (分類バッチ未実行)
                 </td>
               </tr>
@@ -138,7 +147,7 @@ export default async function ThemesPage({
                     </Link>
                   </td>
                   <td className="num muted mono">{r.count}</td>
-                  {PERIODS.map((p) => {
+                  {[WEEK_PERIOD, ...PERIODS].map((p) => {
                     const v = r.returns[p.key] ?? null;
                     return (
                       <td key={p.key} className="num mono" style={heatStyle(v)}>

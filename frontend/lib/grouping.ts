@@ -35,6 +35,12 @@ export type GroupSource = {
 
 export type PeriodDef = { key: string; label: string; bars: number };
 
+/**
+ * 「先週比」= 直近 5 営業日のリターン。
+ * 週次で見る運用なので、1〜12 ヶ月のトレンドとは別に直近 1 週間の動きを併記する。
+ */
+export const WEEK_PERIOD: PeriodDef = { key: "1w", label: "先週比", bars: 5 };
+
 /** ヒートマップの期間 (営業日数ベース)。週次で見る想定なので 1/3/6/12 ヶ月 */
 export const PERIODS: PeriodDef[] = [
   { key: "1m", label: "1ヶ月", bars: 20 },
@@ -180,13 +186,15 @@ function mean(sum: number, n: number): number | null {
 export async function computeGroupReturns(
   src: GroupSource,
 ): Promise<{ asOf: string | null; rows: GroupReturnRow[]; market: Record<string, number | null> }> {
-  const maxBars = Math.max(...PERIODS.map((p) => p.bars));
+  // 表示する期間 (1/3/6/12ヶ月) に加えて、先週比 (5 営業日) も計算する
+  const periods = [WEEK_PERIOD, ...PERIODS];
+  const maxBars = Math.max(...periods.map((p) => p.bars));
   const dates = await recentTradeDates(maxBars);
   if (dates.length === 0) return { asOf: null, rows: [], market: {} };
 
   const asOf = dates[0];
   const anchors = new Map<string, string>(); // 期間キー -> 起点日
-  for (const p of PERIODS) {
+  for (const p of periods) {
     const d = dates[p.bars];
     if (d) anchors.set(p.key, d);
   }
@@ -206,7 +214,7 @@ export async function computeGroupReturns(
     const end = m.get(asOf);
     if (!end) continue;
     const rets: Record<string, number> = {};
-    for (const p of PERIODS) {
+    for (const p of periods) {
       const startDate = anchors.get(p.key);
       if (!startDate) continue;
       const start = m.get(startDate);
@@ -224,7 +232,7 @@ export async function computeGroupReturns(
   for (const code of universe) {
     const rets = retByCode.get(code);
     if (!rets) continue;
-    for (const p of PERIODS) {
+    for (const p of periods) {
       const v = rets[p.key];
       if (v === undefined) continue;
       marketSums[p.key] = (marketSums[p.key] ?? 0) + v;
@@ -248,7 +256,7 @@ export async function computeGroupReturns(
       byGroup.set(gm.group_code, acc);
     }
     acc.codes.add(gm.code);
-    for (const p of PERIODS) {
+    for (const p of periods) {
       const v = rets[p.key];
       if (v === undefined) continue;
       acc.sums[p.key] = (acc.sums[p.key] ?? 0) + v;
@@ -259,13 +267,13 @@ export async function computeGroupReturns(
   const rows: GroupReturnRow[] = [...byGroup.entries()]
     .map(([code, acc]) => {
       const returns: Record<string, number | null> = {};
-      for (const p of PERIODS) returns[p.key] = mean(acc.sums[p.key] ?? 0, acc.counts[p.key] ?? 0);
+      for (const p of periods) returns[p.key] = mean(acc.sums[p.key] ?? 0, acc.counts[p.key] ?? 0);
       return { group_code: code, group_name: acc.name, count: acc.codes.size, returns };
     })
     .sort((a, b) => (b.returns["1m"] ?? -999) - (a.returns["1m"] ?? -999));
 
   const market: Record<string, number | null> = {};
-  for (const p of PERIODS) market[p.key] = mean(marketSums[p.key] ?? 0, marketCounts[p.key] ?? 0);
+  for (const p of periods) market[p.key] = mean(marketSums[p.key] ?? 0, marketCounts[p.key] ?? 0);
 
   return { asOf, rows, market };
 }

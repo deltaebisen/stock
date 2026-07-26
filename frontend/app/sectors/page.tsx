@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { getSectorReturns, PERIODS } from "@/lib/sectors";
+import { getSectorReturns } from "@/lib/sectors";
+import { PERIODS, WEEK_PERIOD } from "@/lib/grouping";
 import { fmtPercent } from "@/lib/format";
 import { byKey, SortTh, type SortDir } from "@/app/_components/SortTh";
 import { heatStyle } from "@/app/_components/heat";
@@ -15,7 +16,7 @@ export default async function SectorsPage({
 }) {
   const sp = await searchParams;
   const level = sp.level === "sector17" ? "sector17" : "sector33";
-  const valid = ["name", "count", ...PERIODS.map((p) => p.key)];
+  const valid = ["name", "count", WEEK_PERIOD.key, ...PERIODS.map((p) => p.key)];
   const sortKey = valid.includes(sp.sort ?? "") ? sp.sort! : "1m";
   const dir: SortDir = sp.dir === "asc" ? "asc" : "desc";
 
@@ -63,6 +64,15 @@ export default async function SectorsPage({
             <tr>
               <SortTh label="業種" sortKey="name" sort={sortKey} dir={dir} basePath="/sectors" keep={keep} />
               <SortTh label="銘柄数" sortKey="count" sort={sortKey} dir={dir} basePath="/sectors" keep={keep} num />
+              <SortTh
+                label={WEEK_PERIOD.label}
+                sortKey={WEEK_PERIOD.key}
+                sort={sortKey}
+                dir={dir}
+                basePath="/sectors"
+                keep={keep}
+                num
+              />
               {PERIODS.map((p) => (
                 <SortTh
                   key={p.key}
@@ -83,7 +93,7 @@ export default async function SectorsPage({
                 <strong>市場平均 (全銘柄等ウェイト)</strong>
               </td>
               <td className="num muted">—</td>
-              {PERIODS.map((p) => {
+              {[WEEK_PERIOD, ...PERIODS].map((p) => {
                 const v = market[p.key] ?? null;
                 return (
                   <td key={p.key} className={`num mono ${v === null ? "" : v > 0 ? "pos" : "neg"}`}>
@@ -100,7 +110,7 @@ export default async function SectorsPage({
                   </Link>
                 </td>
                 <td className="num muted mono">{r.count}</td>
-                {PERIODS.map((p) => {
+                {[WEEK_PERIOD, ...PERIODS].map((p) => {
                   const v = r.returns[p.key] ?? null;
                   return (
                     <td key={p.key} className="num mono" style={heatStyle(v)}>
