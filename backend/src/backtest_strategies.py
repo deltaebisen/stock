@@ -603,7 +603,7 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     "osgf_swing": {
         "smthper": 25,
         "extrasmthper": 15,
-        "atrper": 21,
+        "atrper": 25,
         "mult": 2.5,
         "srcoption": "close",
         "trend_ma": 200,
