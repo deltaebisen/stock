@@ -1,0 +1,35 @@
+name: Notify (ad-hoc)
+
+# 日付を指定して通知だけを流す手動ワークフロー。
+# 条件を変えたあとに過去日ぶんを流し直す / 取りこぼした日を後から送る、といった用途。
+#
+# 価格取得は行わないので、対象日の daily_quotes が既に入っている必要がある
+# (通常は 17:00 JST の daily batch で入っている)。
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "対象日 (YYYY-MM-DD)。空なら daily_quotes の最新営業日"
+        required: false
+        type: string
+      dry_run:
+        description: "Discord に送らず標準出力に出すだけ"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  notify:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Notify Discord with signal hits
+        # 条件・閾値は backend/config/notify.json、webhook は NAS の .env から読む
+        env:
+          TARGET_DATE: ${{ inputs.date }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          if [ -n "$TARGET_DATE" ]; then ARGS="$ARGS --date $TARGET_DATE"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          bash "$NAS_WORKSPACE/run.sh" notify $ARGS
