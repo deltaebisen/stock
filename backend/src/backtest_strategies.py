@@ -423,6 +423,57 @@ class OneSidedGaussianFilterStrategy(Strategy):
         return base
 
 
+class OsgfPreCrossStrategy(OneSidedGaussianFilterStrategy):
+    """OSGF が点灯する**前**に、終値が OSGF ラインを上抜けた銘柄を拾う。
+
+    osgf のロングシグナルは「out が上向きに転じた日」なので、実際に価格が動いた
+    後になる。その手前 — 価格がラインを超えてきたがラインはまだ向きを変えていない
+    段階 — を先回りで拾うための条件。
+
+        cross_up = 終値 > out  かつ  前日終値 <= 前日 out   (当日ラインを上抜けた)
+        点灯前   = out[t] <= out[t-1]                      (ラインはまだ上向いていない)
+
+    上抜けた「その日」だけシグナルを出す (状態ではなくイベント)。同じ銘柄が
+    何日も出続けることはない。
+
+    sell 側は対称に「終値がラインを下抜け、かつ out がまだ下向いていない」。
+
+    トレンドフィルタ (trend_ma の傾き) は osgf と同じものが効く。
+    params は osgf と同じ。
+    """
+
+    name = "osgf_precross"
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        out = self._osgf_line(df)
+        close = df["close"].astype(float)
+        prev_close = close.shift(1)
+        prev_out = out.shift(1)
+
+        # 当日ラインを上抜け / 下抜けした日だけ
+        cross_up = (close > out) & (prev_close <= prev_out)
+        cross_down = (close < out) & (prev_close >= prev_out)
+
+        # まだ点灯していない = ラインが向きを変えていない
+        not_lit_up = out <= prev_out
+        not_lit_down = out >= prev_out
+
+        go_long = cross_up & not_lit_up
+        go_short = cross_down & not_lit_down
+
+        if bool(self.params["trend_filter"]):
+            ma_p = int(self.params["trend_ma"])
+            ma = close.rolling(ma_p, min_periods=ma_p).mean()
+            ma_prev = ma.shift(int(self.params["trend_slope"]))
+            go_long = go_long & (ma > ma_prev)
+            go_short = go_short & (ma < ma_prev)
+
+        signal = pd.Series(0, index=df.index, dtype=int)
+        signal[go_long] = 1
+        signal[go_short] = -1
+        return signal
+
+
 class OsgfSwingStrategy(OneSidedGaussianFilterStrategy):
     """`temp/osgf_rule.md` のスイングルールをそのまま回す戦略。
 
@@ -600,6 +651,16 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     },
     # notify.json の実運用値 (smthper=25 / extrasmthper=15) + osgf_rule.md の
     # SL/TP 乗数。mult は可視化用チャンネルなので tp_mult と揃えてある
+    "osgf_precross": {
+        "smthper": 25,
+        "extrasmthper": 15,
+        "atrper": 25,
+        "mult": 2.5,
+        "srcoption": "close",
+        "trend_ma": 200,
+        "trend_slope": 1,
+        "trend_filter": True,
+    },
     "osgf_swing": {
         "smthper": 25,
         "extrasmthper": 15,
@@ -622,6 +683,7 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "rsi_mean_reversion": RsiMeanReversionStrategy,
     "macd_cross": MacdCrossStrategy,
     "osgf": OneSidedGaussianFilterStrategy,
+    "osgf_precross": OsgfPreCrossStrategy,
     "osgf_swing": OsgfSwingStrategy,
 }
 

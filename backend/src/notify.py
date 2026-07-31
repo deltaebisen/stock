@@ -27,6 +27,9 @@ default 動作 (引数なし):
       # 対象日を固定して Discord 送信せず stdout に流す (検証用)
 
 条件:
+  - `osgf_precross_buy` / `osgf_precross_sell`
+      → OSGF が点灯する**前**に終値が OSGF ラインを上抜け (下抜け) した日を拾う。
+        点灯を待つより早いタイミングで、上抜けた当日だけ出る
   - `osgf_buy` / `osgf_sell`
       → One-Sided Gaussian Filter (fib-gaussian 加重 MA + 2-pole Ehlers super smoother)
         の方向転換 + 200MA トレンドフィルタ。params (Pine 変数名に一致) で smthper /
@@ -183,7 +186,7 @@ class VolumeSpikeCondition(Condition):
 # 条件レジストリ
 # -------------------------------------------------------------------
 
-STRATEGY_BACKED = {"sma_cross", "macd_cross", "rsi_mean_reversion", "osgf"}
+STRATEGY_BACKED = {"sma_cross", "macd_cross", "rsi_mean_reversion", "osgf", "osgf_precross"}
 VOLUME_SPIKE_DEFAULTS: dict[str, Any] = {"window": 20, "mult": 3.0, "min_avg": 10000}
 
 
@@ -205,7 +208,8 @@ def make_condition(name: str, params: dict[str, Any]) -> Condition:
 
     if strat in STRATEGY_BACKED:
         merged = {**DEFAULT_PARAMS.get(strat, {}), **params}
-        if strat == "osgf":
+        if strat in ("osgf", "osgf_precross"):
+            # どちらも ATR チャンネル (smax/smin) を通知に載せる
             return OsgfSignalCondition(strat, merged, direction)
         return StrategySignalCondition(strat, merged, direction)
 

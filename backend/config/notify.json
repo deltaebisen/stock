@@ -11,10 +11,10 @@
     "trend_ma / trend_slope / trend_filter": "Pine には無い独自追加 (要件: 200MA 上向きフィルタ)"
   },
 
-  "conditions": "osgf_buy,osgf_sell",
+  "conditions": "osgf_precross_buy,osgf_sell",
 
   "params": {
-    "osgf_buy": {
+    "osgf_precross_buy": {
       "smthper": 25,
       "extrasmthper": 15,
       "atrper": 25,
