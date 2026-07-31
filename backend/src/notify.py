@@ -50,6 +50,7 @@ default 動作 (引数なし):
                      設定ファイルでは市場ごとの dict も書ける
                      (例: {"プライム": 5000000000, "スタンダード": 100000000, "*": 50000000})
   --max-price        当日 close (調整済) の上限 (円)
+  --min-price        当日 close (調整済) の下限 (円)。低位株を除外する
   --screen-days      売買代金平均の対象営業日数 (default 20)
 
 Webhook URL は `.env` の `DISCORD_WEBHOOK_URL` から読む。`--dry-run` か Webhook 未設定
@@ -228,6 +229,18 @@ def make_condition(name: str, params: dict[str, Any]) -> Condition:
 # -------------------------------------------------------------------
 
 
+# 通知の並び順に使う市場の序列。前方一致で判定し、当てはまらないものは最後
+MARKET_ORDER = ["プライム", "スタンダード", "グロース"]
+
+
+def market_rank(market_name: str | None) -> int:
+    name = market_name or ""
+    for i, m in enumerate(MARKET_ORDER):
+        if name.startswith(m):
+            return i
+    return len(MARKET_ORDER)
+
+
 @dataclass
 class Hit:
     code: str
@@ -235,6 +248,7 @@ class Hit:
     detail: dict[str, Any]
     company_name: str | None = None
     is_etf: bool = False
+    market_name: str | None = None
 
 
 def get_latest_trade_date(engine) -> date | None:
@@ -287,6 +301,7 @@ def screen_by_liquidity_and_price(
     screen_days: int,
     min_avg_turnover: float | dict[str, float] | None,
     max_price: float | None,
+    min_price: float | None = None,
 ) -> list[str]:
     """直近 screen_days 営業日の平均売買代金 + 当日 close (調整済) でフィルタ。
 
@@ -302,7 +317,7 @@ def screen_by_liquidity_and_price(
     dict を渡すと `market_name` の前方一致で引き、`"*"` をフォールバックにする:
         {"プライム": 5e9, "スタンダード": 1e8, "グロース": 7e7, "*": 5e7}
     """
-    if not codes or (min_avg_turnover is None and max_price is None):
+    if not codes or (min_avg_turnover is None and max_price is None and min_price is None):
         return codes
 
     from_date = target_date - timedelta(days=int(screen_days * 1.5))
@@ -355,6 +370,8 @@ def screen_by_liquidity_and_price(
             continue
         if max_price is not None and float(last_close) > max_price:
             continue
+        if min_price is not None and float(last_close) < min_price:
+            continue
         out.append(code)
     return out
 
@@ -365,6 +382,18 @@ def fetch_company_names(engine, codes: list[str]) -> dict[str, str]:
     placeholders = ", ".join(f":c{i}" for i in range(len(codes)))
     params = {f"c{i}": c for i, c in enumerate(codes)}
     sql = f"SELECT code, company_name FROM listed_info WHERE code IN ({placeholders})"
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return {r[0]: (r[1] or "") for r in rows}
+
+
+def fetch_market_names(engine, codes: list[str]) -> dict[str, str]:
+    """並び順 (市場 → 終値降順) に使う market_name を引く。"""
+    if not codes:
+        return {}
+    placeholders = ", ".join(f":c{i}" for i in range(len(codes)))
+    params = {f"c{i}": c for i, c in enumerate(codes)}
+    sql = f"SELECT code, market_name FROM listed_info WHERE code IN ({placeholders})"
     with engine.connect() as conn:
         rows = conn.execute(text(sql), params).fetchall()
     return {r[0]: (r[1] or "") for r in rows}
@@ -458,7 +487,8 @@ def format_hits(hits: list[Hit], target_date: date) -> list[str]:
         if cond == "volume_spike":
             group.sort(key=lambda h: h.detail.get("ratio", 0), reverse=True)
         else:
-            group.sort(key=lambda h: -h.detail.get("close", 0))
+            # 市場 (プライム → スタンダード → グロース → その他) → 終値降順
+            group.sort(key=lambda h: (market_rank(h.market_name), -h.detail.get("close", 0)))
 
     n_equity = sum(1 for h in hits if not h.is_etf)
     n_etf = sum(1 for h in hits if h.is_etf)
@@ -506,11 +536,12 @@ def build_watchlist_files(
 
     - フォーマット: `TSE:<コード>` 1 行 1 銘柄 (東証銘柄前提)
     - `_sell` 終わりの condition は sell、それ以外は buy
-    - 重複コードは除去、当日 close **降順** (同値は code 昇順)
+    - 重複コードは除去、**市場順 (プライム → スタンダード → グロース → その他) →
+      当日 close 降順** (同値は code 昇順)
     - ファイル名は TradingView インポート時にそのままウォッチリスト名になる
     """
-    # (is_etf, is_sell) → {code: close}
-    buckets: dict[tuple[bool, bool], dict[str, float]] = {
+    # (is_etf, is_sell) → {code: (market_rank, close)}
+    buckets: dict[tuple[bool, bool], dict[str, tuple[int, float]]] = {
         (False, False): {},  # equity buy
         (False, True): {},   # equity sell
         (True, False): {},   # etf buy
@@ -519,7 +550,7 @@ def build_watchlist_files(
     for h in hits:
         close = float(h.detail.get("close", 0.0))
         is_sell = h.condition.endswith("_sell")
-        buckets[(h.is_etf, is_sell)][h.code] = close
+        buckets[(h.is_etf, is_sell)][h.code] = (market_rank(h.market_name), close)
 
     date_str = target_date.isoformat()
     name_map = {
@@ -532,7 +563,8 @@ def build_watchlist_files(
     for key, mapping in buckets.items():
         if not mapping:
             continue
-        ordered = sorted(mapping.items(), key=lambda kv: (-kv[1], kv[0]))
+        # 市場 (プライム → スタンダード → グロース → その他) → 終値降順
+        ordered = sorted(mapping.items(), key=lambda kv: (kv[1][0], -kv[1][1], kv[0]))
         body = "\n".join(f"TSE:{code}" for code, _ in ordered)
         out.append((f"{date_str} {name_map[key]}.txt", body.encode("utf-8")))
     return out
@@ -633,6 +665,7 @@ CONFIG_FALLBACKS: dict[str, Any] = {
     "market": "プライム",
     "min_turnover": 1_000_000_000.0,
     "max_price": 4000.0,
+    "min_price": 0.0,
     "screen_days": 20,
     "lookback_days": 400,
     "no_etf": False,
@@ -703,6 +736,12 @@ def main(argv: list[str] | None = None) -> int:
         help="直近 screen-days 平均売買代金 (円) の下限。default: 1e9 (=10億)。0 で無効",
     )
     p.add_argument(
+        "--min-price",
+        type=float,
+        default=None,
+        help="当日 close (調整済) の下限 (円)。低位株を除外する",
+    )
+    p.add_argument(
         "--max-price",
         type=float,
         default=None,
@@ -754,6 +793,7 @@ def main(argv: list[str] | None = None) -> int:
         "market",
         "min_turnover",
         "max_price",
+        "min_price",
         "screen_days",
         "lookback_days",
         "no_etf",
@@ -805,12 +845,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         min_turn = float(raw_turn) if raw_turn and float(raw_turn) > 0 else None
     max_price = args.max_price if args.max_price and args.max_price > 0 else None
+    min_price = args.min_price if getattr(args, "min_price", None) and args.min_price > 0 else None
 
     def _apply_liquidity(label: str, codes: list[str]) -> list[str]:
-        if min_turn is None and max_price is None:
+        if min_turn is None and max_price is None and min_price is None:
             return codes
         codes = screen_by_liquidity_and_price(
-            engine, codes, target_date, args.screen_days, min_turn, max_price
+            engine, codes, target_date, args.screen_days, min_turn, max_price, min_price
         )
         cond_str = []
         if isinstance(min_turn, dict):
@@ -821,6 +862,8 @@ def main(argv: list[str] | None = None) -> int:
             cond_str.append(f"avg_turnover≥{min_turn:,.0f}")
         if max_price:
             cond_str.append(f"close≤{max_price:,.0f}")
+        if min_price:
+            cond_str.append(f"close≥{min_price:,.0f}")
         print(f"[notify] {label} after {'/'.join(cond_str)} → {len(codes)} 銘柄")
         return codes
 
@@ -866,8 +909,10 @@ def main(argv: list[str] | None = None) -> int:
     if hits:
         unique = sorted({h.code for h in hits})
         names = fetch_company_names(engine, unique)
+        markets = fetch_market_names(engine, unique)
         for h in hits:
             h.company_name = names.get(h.code)
+            h.market_name = markets.get(h.code)
 
     messages = format_hits(hits, target_date)
     attachments = build_watchlist_files(hits, target_date)
