@@ -27,9 +27,9 @@ default 動作 (引数なし):
       # 対象日を固定して Discord 送信せず stdout に流す (検証用)
 
 条件:
-  - `osgf_precross_buy` / `osgf_precross_sell`
-      → OSGF が点灯する**前**に終値が OSGF ラインを上抜け (下抜け) した日を拾う。
-        点灯を待つより早いタイミングで、上抜けた当日だけ出る
+  - `osgf_cross_buy` / `osgf_cross_sell`
+      → 終値が OSGF ラインを下から上に (上から下に) 抜けた日を拾う。
+        ラインの向きが変わるのを待たないぶん osgf より早い。抜けた当日だけ出る
   - `osgf_buy` / `osgf_sell`
       → One-Sided Gaussian Filter (fib-gaussian 加重 MA + 2-pole Ehlers super smoother)
         の方向転換 + 200MA トレンドフィルタ。params (Pine 変数名に一致) で smthper /
@@ -46,7 +46,9 @@ default 動作 (引数なし):
 スクリーニング:
   --market           市場フィルタ。market_code 完全一致 or market_name 前方一致
                      (例: 'プライム' / '0111')。空文字で無効化
-  --min-turnover     直近 screen-days 日平均売買代金 (円) の下限
+  --min-turnover     直近 screen-days 日平均売買代金 (円) の下限。
+                     設定ファイルでは市場ごとの dict も書ける
+                     (例: {"プライム": 5000000000, "スタンダード": 100000000, "*": 50000000})
   --max-price        当日 close (調整済) の上限 (円)
   --screen-days      売買代金平均の対象営業日数 (default 20)
 
@@ -186,7 +188,7 @@ class VolumeSpikeCondition(Condition):
 # 条件レジストリ
 # -------------------------------------------------------------------
 
-STRATEGY_BACKED = {"sma_cross", "macd_cross", "rsi_mean_reversion", "osgf", "osgf_precross"}
+STRATEGY_BACKED = {"sma_cross", "macd_cross", "rsi_mean_reversion", "osgf", "osgf_cross"}
 VOLUME_SPIKE_DEFAULTS: dict[str, Any] = {"window": 20, "mult": 3.0, "min_avg": 10000}
 
 
@@ -208,7 +210,7 @@ def make_condition(name: str, params: dict[str, Any]) -> Condition:
 
     if strat in STRATEGY_BACKED:
         merged = {**DEFAULT_PARAMS.get(strat, {}), **params}
-        if strat in ("osgf", "osgf_precross"):
+        if strat in ("osgf", "osgf_cross"):
             # どちらも ATR チャンネル (smax/smin) を通知に載せる
             return OsgfSignalCondition(strat, merged, direction)
         return StrategySignalCondition(strat, merged, direction)
@@ -283,7 +285,7 @@ def screen_by_liquidity_and_price(
     codes: list[str],
     target_date: date,
     screen_days: int,
-    min_avg_turnover: float | None,
+    min_avg_turnover: float | dict[str, float] | None,
     max_price: float | None,
 ) -> list[str]:
     """直近 screen_days 営業日の平均売買代金 + 当日 close (調整済) でフィルタ。
@@ -293,6 +295,12 @@ def screen_by_liquidity_and_price(
 
     AVG の対象期間は `target_date - screen_days*1.5 暦日` 〜 `target_date` の全行 ≒
     直近 screen_days 営業日 (祝祭日があると多少前後する)。
+
+    **min_avg_turnover は市場ごとに変えられる**。市場によって流動性の水準が
+    2 桁違う (ヒット銘柄の平均売買代金の中央値はプライム 3.2 億に対しスタンダード
+    0.1 億) ため、一律の閾値だと実質プライム専用フィルタになってしまう。
+    dict を渡すと `market_name` の前方一致で引き、`"*"` をフォールバックにする:
+        {"プライム": 5e9, "スタンダード": 1e8, "グロース": 7e7, "*": 5e7}
     """
     if not codes or (min_avg_turnover is None and max_price is None):
         return codes
@@ -315,14 +323,35 @@ def screen_by_liquidity_and_price(
     with engine.connect() as conn:
         rows = conn.execute(text(sql), params).fetchall()
 
+    market_of: dict[str, str] = {}
+    if isinstance(min_avg_turnover, dict):
+        placeholders2 = ", ".join(f":m{i}" for i in range(len(codes)))
+        with engine.connect() as conn:
+            market_of = {
+                r[0]: (r[1] or "")
+                for r in conn.execute(
+                    text(f"SELECT code, market_name FROM listed_info WHERE code IN ({placeholders2})"),
+                    {f"m{i}": c for i, c in enumerate(codes)},
+                ).fetchall()
+            }
+
+    def threshold_for(code: str) -> float | None:
+        if not isinstance(min_avg_turnover, dict):
+            return min_avg_turnover
+        market = market_of.get(code, "")
+        for key, val in min_avg_turnover.items():
+            if key != "*" and market.startswith(key):
+                return float(val)
+        star = min_avg_turnover.get("*")
+        return float(star) if star is not None else None
+
     out: list[str] = []
     for code, avg_t, last_close in rows:
         # 当日値が無い銘柄 (売買停止 / 上場廃止) は除外
         if last_close is None:
             continue
-        if min_avg_turnover is not None and (
-            avg_t is None or float(avg_t) < min_avg_turnover
-        ):
+        th = threshold_for(code)
+        if th is not None and (avg_t is None or float(avg_t) < th):
             continue
         if max_price is not None and float(last_close) > max_price:
             continue
@@ -766,7 +795,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"[notify] universe={args.universe} → {len(universe_codes)} 銘柄")
 
-    min_turn = args.min_turnover if args.min_turnover and args.min_turnover > 0 else None
+    # min_turnover は数値 (全市場一律) と dict (市場別) の両方を受ける。
+    # dict は CLI からは渡せないので設定ファイル経由 (notify.json) のみ。
+    raw_turn = args.min_turnover
+    if isinstance(raw_turn, dict):
+        min_turn: float | dict[str, float] | None = {k: float(v) for k, v in raw_turn.items() if v}
+        if not min_turn:
+            min_turn = None
+    else:
+        min_turn = float(raw_turn) if raw_turn and float(raw_turn) > 0 else None
     max_price = args.max_price if args.max_price and args.max_price > 0 else None
 
     def _apply_liquidity(label: str, codes: list[str]) -> list[str]:
@@ -776,7 +813,11 @@ def main(argv: list[str] | None = None) -> int:
             engine, codes, target_date, args.screen_days, min_turn, max_price
         )
         cond_str = []
-        if min_turn:
+        if isinstance(min_turn, dict):
+            cond_str.append(
+                "avg_turnover≥{" + ", ".join(f"{k}:{v:,.0f}" for k, v in min_turn.items()) + "}"
+            )
+        elif min_turn:
             cond_str.append(f"avg_turnover≥{min_turn:,.0f}")
         if max_price:
             cond_str.append(f"close≤{max_price:,.0f}")

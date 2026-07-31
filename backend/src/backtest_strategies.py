@@ -423,26 +423,20 @@ class OneSidedGaussianFilterStrategy(Strategy):
         return base
 
 
-class OsgfPreCrossStrategy(OneSidedGaussianFilterStrategy):
-    """OSGF が点灯する**前**に、終値が OSGF ラインを上抜けた銘柄を拾う。
+class OsgfCrossStrategy(OneSidedGaussianFilterStrategy):
+    """終値が OSGF ラインを下から上に抜けた日を拾う。
 
-    osgf のロングシグナルは「out が上向きに転じた日」なので、実際に価格が動いた
-    後になる。その手前 — 価格がラインを超えてきたがラインはまだ向きを変えていない
-    段階 — を先回りで拾うための条件。
+        buy  = 終値 > out  かつ  前日終値 <= 前日 out
+        sell = 終値 < out  かつ  前日終値 >= 前日 out
 
-        cross_up = 終値 > out  かつ  前日終値 <= 前日 out   (当日ラインを上抜けた)
-        点灯前   = out[t] <= out[t-1]                      (ラインはまだ上向いていない)
+    osgf (ライン自体の向きが変わった日) より早いタイミングで、価格がラインを
+    超えてきた瞬間を捉える。状態ではなくイベントなので、同じ銘柄が何日も出続けない。
 
-    上抜けた「その日」だけシグナルを出す (状態ではなくイベント)。同じ銘柄が
-    何日も出続けることはない。
-
-    sell 側は対称に「終値がラインを下抜け、かつ out がまだ下向いていない」。
-
-    トレンドフィルタ (trend_ma の傾き) は osgf と同じものが効く。
-    params は osgf と同じ。
+    params は osgf と同じ。trend_filter=True なら trend_ma の傾きでも絞る
+    (buy は上向き時のみ)。
     """
 
-    name = "osgf_precross"
+    name = "osgf_cross"
 
     def generate_signals(self, df: pd.DataFrame) -> pd.Series:
         out = self._osgf_line(df)
@@ -450,16 +444,8 @@ class OsgfPreCrossStrategy(OneSidedGaussianFilterStrategy):
         prev_close = close.shift(1)
         prev_out = out.shift(1)
 
-        # 当日ラインを上抜け / 下抜けした日だけ
-        cross_up = (close > out) & (prev_close <= prev_out)
-        cross_down = (close < out) & (prev_close >= prev_out)
-
-        # まだ点灯していない = ラインが向きを変えていない
-        not_lit_up = out <= prev_out
-        not_lit_down = out >= prev_out
-
-        go_long = cross_up & not_lit_up
-        go_short = cross_down & not_lit_down
+        go_long = (close > out) & (prev_close <= prev_out)
+        go_short = (close < out) & (prev_close >= prev_out)
 
         if bool(self.params["trend_filter"]):
             ma_p = int(self.params["trend_ma"])
@@ -651,7 +637,7 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     },
     # notify.json の実運用値 (smthper=25 / extrasmthper=15) + osgf_rule.md の
     # SL/TP 乗数。mult は可視化用チャンネルなので tp_mult と揃えてある
-    "osgf_precross": {
+    "osgf_cross": {
         "smthper": 25,
         "extrasmthper": 15,
         "atrper": 25,
@@ -683,7 +669,7 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "rsi_mean_reversion": RsiMeanReversionStrategy,
     "macd_cross": MacdCrossStrategy,
     "osgf": OneSidedGaussianFilterStrategy,
-    "osgf_precross": OsgfPreCrossStrategy,
+    "osgf_cross": OsgfCrossStrategy,
     "osgf_swing": OsgfSwingStrategy,
 }
 

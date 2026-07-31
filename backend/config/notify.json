@@ -1,46 +1,38 @@
 {
   "_comment": "通知バッチ (src.notify) の設定。CLI 引数で明示指定するとこの値より優先される。params のキー名は Pine (OSGF [Loxx]) の入力変数名にそのまま一致させている。JSON はコメント不可なので対応は下の _param_map を参照。",
-
   "_param_map": {
-    "smthper":      "Pine smthper       = 設定画面 'Guassian Levels Depth'",
+    "smthper": "Pine smthper       = 設定画面 'Guassian Levels Depth'",
     "extrasmthper": "Pine extrasmthper  = 設定画面 'Extra Smoothing (2-Pole Ehlers Super Smoother) Period'",
-    "atrper":       "Pine atrper        = 設定画面 'ATR Period' (チャンネル用・シグナル非関与)",
-    "mult":         "Pine mult          = 設定画面 'ATR乗数 (ATR Multiplier)' (upper/lower = out ± atr*mult)",
-    "srcoption":    "Pine srcoption     = 設定画面 'ソース (Source)'。非HA標準11種: close/open/high/low/median/typical/weighted/average/avemedbody/trendb/trendbext",
-    "smthtype":     "Pine smthtype      = 設定画面 'Heiken-Ashi Better Smoothing'。HAB source 専用で srcoption=close では無効 → 未移植なので params に無い",
+    "atrper": "Pine atrper        = 設定画面 'ATR Period' (チャンネル用・シグナル非関与)",
+    "mult": "Pine mult          = 設定画面 'ATR乗数 (ATR Multiplier)' (upper/lower = out ± atr*mult)",
+    "srcoption": "Pine srcoption     = 設定画面 'ソース (Source)'。非HA標準11種: close/open/high/low/median/typical/weighted/average/avemedbody/trendb/trendbext",
+    "smthtype": "Pine smthtype      = 設定画面 'Heiken-Ashi Better Smoothing'。HAB source 専用で srcoption=close では無効 → 未移植なので params に無い",
     "trend_ma / trend_slope / trend_filter": "Pine には無い独自追加 (要件: 200MA 上向きフィルタ)"
   },
-
-  "conditions": "osgf_precross_buy,osgf_sell",
-
+  "conditions": "osgf_cross_buy",
   "params": {
-    "osgf_precross_buy": {
-      "smthper": 25,
+    "osgf_cross_buy": {
+      "smthper": 60,
       "extrasmthper": 15,
       "atrper": 25,
       "mult": 2.5,
       "srcoption": "close",
       "trend_ma": 200,
       "trend_slope": 1,
-      "trend_filter": true
-    },
-    "osgf_sell": {
-      "smthper": 25,
-      "extrasmthper": 15,
-      "atrper": 25,
-      "mult": 2.5,
-      "srcoption": "close",
-      "trend_ma": 200,
-      "trend_slope": 1,
-      "trend_filter": true
+      "trend_filter": false
     }
   },
-
   "universe": "all",
-  "market": "プライム",
-  "min_turnover": 1000000000,
-  "max_price": 4000,
+  "market": "",
+  "min_turnover": {
+    "プライム": 5000000000,
+    "スタンダード": 100000000,
+    "グロース": 70000000,
+    "*": 50000000
+  },
+  "max_price": 5000,
   "screen_days": 20,
   "lookback_days": 400,
-  "no_etf": false
+  "no_etf": false,
+  "_screening_note": "min_turnover は市場ごと。市場によって流動性の水準が 2 桁違うため一律にすると実質プライム専用フィルタになる。キーは market_name の前方一致、'*' がフォールバック。この値は直近 20 営業日の実績で各市場おおよそ 5 件/日 になる水準"
 }
