@@ -408,7 +408,8 @@ def fetch_market_names(engine, codes: list[str]) -> dict[str, str]:
 # チャンクに割って評価済みのぶんを都度捨てれば、ピークは universe 数に依らず
 # 一定になる。銘柄ごとに独立して判定する処理なので分割しても結果は変わらない。
 # 環境変数 NOTIFY_CHUNK_SIZE で調整可 (0 で分割無効 = 従来どおり一括)。
-DEFAULT_CHUNK_SIZE = 250
+# NAS は空きメモリが数百 MB しかなく、250 銘柄だと exit 137 (OOM kill) を頻繁に踏むので 100。
+DEFAULT_CHUNK_SIZE = 100
 
 
 def detect(
@@ -455,6 +456,18 @@ MAX_MESSAGE_CHARS = 1800
 MAX_PER_CONDITION_DISPLAY = 50
 
 
+# 通知行に出す市場の短縮表記
+MARKET_SHORT = {"プライム": "プライム", "スタンダード": "スタンダ", "グロース": "グロース"}
+
+
+def _short_market(market_name: str | None) -> str:
+    name = market_name or ""
+    for key, short in MARKET_SHORT.items():
+        if name.startswith(key):
+            return short
+    return name[:4] if name else "-"
+
+
 def _format_hit_line(h: Hit) -> str:
     name = (h.company_name or "")[:18]
     d = h.detail
@@ -468,7 +481,7 @@ def _format_hit_line(h: Hit) -> str:
         stop = d["upper"] if h.condition.endswith("_sell") else d["lower"]
         extras.append(f"SL¥{stop:,.0f}")
     suffix = (" / ".join(extras)) if extras else ""
-    return f"`{h.code}` {name} {suffix}".rstrip()
+    return f"`{h.code}` [{_short_market(h.market_name)}] {name} {suffix}".rstrip()
 
 
 def format_hits(hits: list[Hit], target_date: date) -> list[str]:
@@ -893,8 +906,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # lookback (warmup 営業日 × 1.6 + 余裕 30 を暦日換算の最低ラインに)
     max_warmup = max((c.warmup() for c in conditions), default=0)
+    # warmup から必要日数を出す (営業日 → 暦日換算 1.6 倍 + 余裕 30 日)。
+    # lookback_days に 0 以下を指定すると「必要ぶんだけ読む」= 自動。
+    # 固定 400 日にしていた頃は warmup 78 バーの条件でも 400 日読んでいて、
+    # NAS のメモリ逼迫 (exit 137) の主因になっていた。
     needed = int(max_warmup * 1.6) + 30
-    lookback = max(args.lookback_days, needed)
+    if args.lookback_days and args.lookback_days > 0:
+        lookback = max(args.lookback_days, needed)
+    else:
+        lookback = needed
     print(f"[notify] lookback={lookback} days (max warmup bars={max_warmup})")
 
     hits = detect(engine, all_codes, conditions, target_date, lookback)
