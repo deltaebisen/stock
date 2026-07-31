@@ -32,8 +32,9 @@
   },
   "max_price": 5000,
   "screen_days": 20,
-  "lookback_days": 400,
+  "lookback_days": 0,
   "no_etf": false,
   "_screening_note": "min_turnover は市場ごと。市場によって流動性の水準が 2 桁違うため一律にすると実質プライム専用フィルタになる。キーは market_name の前方一致、'*' がフォールバック。この値は直近 20 営業日の実績で各市場おおよそ 5 件/日 になる水準 min_price は低位株の除外 (100 円未満は通知しない)。",
-  "min_price": 100
+  "min_price": 100,
+  "_lookback_note": "0 = 条件の warmup から自動算出 (必要ぶんだけ読む)。固定日数を読ませたいときだけ日数を書く"
 }
