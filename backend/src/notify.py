@@ -4,8 +4,9 @@
 指定の条件で発火した銘柄を Discord webhook に通知する。
 
 default 動作 (引数なし):
-  - 条件: One-Sided Gaussian Filter [Loxx] の方向転換 (buy=上向き転換 / sell=下向き転換)
-    かつ 200MA の傾きでフィルタ (buy は 200MA 上向き時のみ、sell は下向き時のみ)
+  - 条件: 設定ファイル (`backend/config/notify.json`) の `conditions`。
+    現行は `stoch_oversold_buy` = 終値が 200MA より上 かつ
+    ストキャスティクス (8,3,3) の %K が 20 以下に入った銘柄
   - 個別株スクリーニング: 東証プライム / 直近20日平均売買代金 ≥ 1B 円 / 当日 close ≤ 4000 円
   - ETF (sector33_code='9999') は **同じ流動性 / 価格条件で独立に抽出**。`--no-etf` で無効化
   - 添付ファイル: 個別株 buy/sell + ETF buy/sell の最大 4 ファイル
@@ -34,6 +35,12 @@ default 動作 (引数なし):
       → One-Sided Gaussian Filter (fib-gaussian 加重 MA + 2-pole Ehlers super smoother)
         の方向転換 + 200MA トレンドフィルタ。params (Pine 変数名に一致) で smthper /
         extrasmthper / atrper / mult / srcoption / trend_ma / trend_slope / trend_filter を変更可
+  - `stoch_oversold_buy` / `stoch_oversold_sell`
+      → 終値が 200MA より上 かつ ストキャスティクス (8,3,3) の %K が 20 以下に
+        入った日を拾う (sell は %K が 80 以上に入った日、200MA フィルタ無し)。
+        params で k / k_smooth / d_smooth / oversold / overbought / signal_line /
+        ma_period / ma_filter / mode を変更可。`mode=state` にするとゾーンに
+        居る間は毎日発火 (default `cross` は入った当日だけ)
   - `sma_cross_buy` / `sma_cross_sell` / `macd_cross_buy` / `macd_cross_sell` /
     `rsi_mean_reversion_buy` / `rsi_mean_reversion_sell`
       → backtest_strategies.py の戦略を流用して当日 (target_date) の signal を判定
@@ -143,6 +150,28 @@ class OsgfSignalCondition(StrategySignalCondition):
         return base
 
 
+class StochSignalCondition(StrategySignalCondition):
+    """stoch_oversold 戦略ベース + ストキャスティクスの %K / %D を detail に付与。
+
+    シグナル判定は StrategySignalCondition と同じ (200MA より上 + %K が 20 以下)。
+    通知行に当日の %K を載せてどれだけ沈んでいるか見えるようにする。
+    """
+
+    def evaluate(self, df: pd.DataFrame) -> dict[str, Any] | None:
+        base = super().evaluate(df)
+        if base is None:
+            return None
+        k, d = self.strategy.stochastic(df)
+
+        def _last(s: pd.Series) -> float | None:
+            v = s.iloc[-1]
+            return float(v) if not pd.isna(v) else None
+
+        base["stoch_k"] = _last(k)
+        base["stoch_d"] = _last(d)
+        return base
+
+
 class VolumeSpikeCondition(Condition):
     """直近 window 日平均出来高に対し当日が mult 倍以上なら発火。
 
@@ -189,7 +218,14 @@ class VolumeSpikeCondition(Condition):
 # 条件レジストリ
 # -------------------------------------------------------------------
 
-STRATEGY_BACKED = {"sma_cross", "macd_cross", "rsi_mean_reversion", "osgf", "osgf_cross"}
+STRATEGY_BACKED = {
+    "sma_cross",
+    "macd_cross",
+    "rsi_mean_reversion",
+    "osgf",
+    "osgf_cross",
+    "stoch_oversold",
+}
 VOLUME_SPIKE_DEFAULTS: dict[str, Any] = {"window": 20, "mult": 3.0, "min_avg": 10000}
 
 
@@ -214,6 +250,8 @@ def make_condition(name: str, params: dict[str, Any]) -> Condition:
         if strat in ("osgf", "osgf_cross"):
             # どちらも ATR チャンネル (smax/smin) を通知に載せる
             return OsgfSignalCondition(strat, merged, direction)
+        if strat == "stoch_oversold":
+            return StochSignalCondition(strat, merged, direction)
         return StrategySignalCondition(strat, merged, direction)
 
     raise ValueError(
@@ -476,6 +514,8 @@ def _format_hit_line(h: Hit) -> str:
         extras.append(f"¥{d['close']:,.0f}")
     if "ratio" in d:
         extras.append(f"vol×{d['ratio']:.1f}")
+    if d.get("stoch_k") is not None:
+        extras.append(f"%K{d['stoch_k']:.0f}")
     # OSGF の ATR チャンネル: buy は下限(smin)、sell は上限(smax)をストップ参考に
     if d.get("lower") is not None and d.get("upper") is not None:
         stop = d["upper"] if h.condition.endswith("_sell") else d["lower"]
@@ -673,7 +713,7 @@ DEFAULT_CONFIG_PATH = "/app/config/notify.json"
 # 条件別パラメータ (osgf の smthper 等) は backtest_strategies.py の DEFAULT_PARAMS
 # に委譲するので、ここには持たない。
 CONFIG_FALLBACKS: dict[str, Any] = {
-    "conditions": "osgf_buy,osgf_sell",
+    "conditions": "stoch_oversold_buy",
     "universe": "all",
     "market": "プライム",
     "min_turnover": 1_000_000_000.0,
@@ -718,7 +758,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--conditions",
         default=None,
-        help="カンマ区切り。default: osgf_buy,osgf_sell",
+        help="カンマ区切り。default: stoch_oversold_buy",
     )
     p.add_argument(
         "--params",

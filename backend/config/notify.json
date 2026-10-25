@@ -1,25 +1,25 @@
 {
-  "_comment": "通知バッチ (src.notify) の設定。CLI 引数で明示指定するとこの値より優先される。params のキー名は Pine (OSGF [Loxx]) の入力変数名にそのまま一致させている。JSON はコメント不可なので対応は下の _param_map を参照。",
+  "_comment": "通知バッチ (src.notify) の設定。CLI 引数で明示指定するとこの値より優先される。JSON はコメント不可なので params の意味は下の _param_map を参照。",
   "_param_map": {
-    "smthper": "Pine smthper       = 設定画面 'Guassian Levels Depth'",
-    "extrasmthper": "Pine extrasmthper  = 設定画面 'Extra Smoothing (2-Pole Ehlers Super Smoother) Period'",
-    "atrper": "Pine atrper        = 設定画面 'ATR Period' (チャンネル用・シグナル非関与)",
-    "mult": "Pine mult          = 設定画面 'ATR乗数 (ATR Multiplier)' (upper/lower = out ± atr*mult)",
-    "srcoption": "Pine srcoption     = 設定画面 'ソース (Source)'。非HA標準11種: close/open/high/low/median/typical/weighted/average/avemedbody/trendb/trendbext",
-    "smthtype": "Pine smthtype      = 設定画面 'Heiken-Ashi Better Smoothing'。HAB source 専用で srcoption=close では無効 → 未移植なので params に無い",
-    "trend_ma / trend_slope / trend_filter": "Pine には無い独自追加 (要件: 200MA 上向きフィルタ)"
+    "k / k_smooth / d_smooth": "TradingView 'Stochastic' の 3 入力 (%K Length / %K Smoothing / %D Smoothing) = 8 3 3",
+    "oversold": "buy 閾値。%K がこの値以下に入った日に発火 (要件: 20 以下)",
+    "overbought": "sell 閾値 (stoch_oversold_sell を使う場合のみ関係)",
+    "signal_line": "閾値判定に使う線。'k' = 平滑済み %K (slow %K) / 'd' = %D",
+    "ma_period / ma_filter": "価格位置フィルタ。close > SMA(ma_period) を要求 (要件: 日足 200MA より上)",
+    "mode": "'cross' = 20 以下に入った当日だけ発火 / 'state' = 20 以下に居る間は毎日発火"
   },
-  "conditions": "osgf_cross_buy",
+  "conditions": "stoch_oversold_buy",
   "params": {
-    "osgf_cross_buy": {
-      "smthper": 60,
-      "extrasmthper": 15,
-      "atrper": 25,
-      "mult": 2.5,
-      "srcoption": "close",
-      "trend_ma": 200,
-      "trend_slope": 1,
-      "trend_filter": false
+    "stoch_oversold_buy": {
+      "k": 8,
+      "k_smooth": 3,
+      "d_smooth": 3,
+      "oversold": 20,
+      "overbought": 80,
+      "signal_line": "k",
+      "ma_period": 200,
+      "ma_filter": true,
+      "mode": "cross"
     }
   },
   "universe": "all",
