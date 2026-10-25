@@ -169,6 +169,96 @@ class MacdCrossStrategy(Strategy):
         return int(self.params["slow"]) + int(self.params["signal"])
 
 
+class StochOversoldStrategy(Strategy):
+    """200MA より上 かつ ストキャスティクス (8,3,3) が oversold 以下。
+
+    上昇トレンド中の押し目を拾う想定。TradingView の "Stochastic" と同じ 3 入力:
+
+        raw %K = (close - LL(k)) / (HH(k) - LL(k)) * 100
+        %K     = SMA(raw %K, k_smooth)     # いわゆる slow %K
+        %D     = SMA(%K, d_smooth)
+
+    `k=8, k_smooth=3, d_smooth=3` が default (= 設定画面の "8 3 3")。
+
+    シグナル:
+        buy  = %K が oversold 以下   かつ  close > SMA(ma_period)
+        sell = %K が overbought 以上 (保有解消用。ma_filter は掛けない)
+
+    params:
+      k           : %K の期間 (default 8)
+      k_smooth    : %K の平滑期間 (default 3)
+      d_smooth    : %D の平滑期間 (default 3)
+      oversold    : buy 閾値 (default 20)
+      overbought  : sell 閾値 (default 80)
+      signal_line : 閾値判定に使う線。'k' (default) or 'd'
+      ma_period   : 価格位置フィルタの SMA 期間 (default 200)
+      ma_filter   : 200MA フィルタ有効化 (default True)
+      mode        : 'cross' (default) = 閾値ゾーンに「入った」日だけ発火 /
+                    'state' = ゾーンに居る間は毎日発火
+    """
+
+    name = "stoch_oversold"
+
+    def stochastic(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        """(%K, %D) を返す。%K は k_smooth で平滑済み (slow %K)。"""
+        k_p = int(self.params["k"])
+        k_s = int(self.params["k_smooth"])
+        d_s = int(self.params["d_smooth"])
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+        close = df["close"].astype(float)
+
+        hh = high.rolling(k_p, min_periods=k_p).max()
+        ll = low.rolling(k_p, min_periods=k_p).min()
+        rng = hh - ll
+        # レンジ 0 (全日同値 / 売買停止明け等) はゼロ除算になるので 50 に倒す
+        raw_k = ((close - ll) / rng.replace(0, np.nan) * 100).where(rng > 0, 50.0)
+        k = raw_k.rolling(k_s, min_periods=k_s).mean()
+        d = k.rolling(d_s, min_periods=d_s).mean()
+        return k, d
+
+    def _line(self, df: pd.DataFrame) -> pd.Series:
+        k, d = self.stochastic(df)
+        return d if str(self.params.get("signal_line", "k")).lower() == "d" else k
+
+    def trend_ma(self, df: pd.DataFrame) -> pd.Series:
+        ma_p = int(self.params["ma_period"])
+        return df["close"].astype(float).rolling(ma_p, min_periods=ma_p).mean()
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.Series:
+        line = self._line(df)
+        oversold = float(self.params["oversold"])
+        overbought = float(self.params["overbought"])
+
+        in_low = line <= oversold
+        in_high = line >= overbought
+        if str(self.params.get("mode", "cross")).lower() == "state":
+            go_long, go_short = in_low, in_high
+        else:
+            prev = line.shift(1)
+            go_long = in_low & (prev > oversold)
+            go_short = in_high & (prev < overbought)
+
+        if bool(self.params["ma_filter"]):
+            # 「200MA より上」= 価格が MA を上回っている (傾きではなく位置で見る)
+            go_long = go_long & (df["close"].astype(float) > self.trend_ma(df))
+
+        signal = pd.Series(0, index=df.index, dtype=int)
+        signal[go_long] = 1
+        signal[go_short] = -1
+        return signal
+
+    def required_warmup(self) -> int:
+        base = (
+            int(self.params["k"])
+            + int(self.params["k_smooth"])
+            + int(self.params["d_smooth"])
+        )
+        if bool(self.params["ma_filter"]):
+            return max(base, int(self.params["ma_period"]))
+        return base
+
+
 # -------------------------------------------------------------------
 # One-Sided Gaussian Filter (Loxx) 移植ヘルパー
 # -------------------------------------------------------------------
@@ -625,6 +715,17 @@ DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     "sma_cross": {"fast": 25, "slow": 75},
     "rsi_mean_reversion": {"period": 14, "oversold": 30, "overbought": 70},
     "macd_cross": {"fast": 12, "slow": 26, "signal": 9},
+    "stoch_oversold": {
+        "k": 8,
+        "k_smooth": 3,
+        "d_smooth": 3,
+        "oversold": 20,
+        "overbought": 80,
+        "signal_line": "k",
+        "ma_period": 200,
+        "ma_filter": True,
+        "mode": "cross",
+    },
     "osgf": {
         "smthper": 10,
         "extrasmthper": 10,
@@ -668,6 +769,7 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "sma_cross": SmaCrossStrategy,
     "rsi_mean_reversion": RsiMeanReversionStrategy,
     "macd_cross": MacdCrossStrategy,
+    "stoch_oversold": StochOversoldStrategy,
     "osgf": OneSidedGaussianFilterStrategy,
     "osgf_cross": OsgfCrossStrategy,
     "osgf_swing": OsgfSwingStrategy,

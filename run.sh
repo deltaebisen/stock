@@ -360,7 +360,8 @@ case "${1:-}" in
     # シグナル検知 + Discord 通知。"notify" 以降の引数を src.notify に passthrough。
     # 例:
     #   ./run.sh notify
-    #     # default: 設定ファイル backend/config/notify.json (osgf_buy,osgf_sell + 200MA)
+    #     # default: 設定ファイル backend/config/notify.json
+    #     #          (stoch_oversold_buy = 200MA より上 + ストキャス 8,3,3 が 20 以下)
     #   ./run.sh notify --conditions volume_spike --params 'volume_spike:mult=5'
     #   ./run.sh notify --date 2026-05-29 --dry-run
     # 検知条件・パラメータ・スクリーニング閾値は backend/config/notify.json で調整する
